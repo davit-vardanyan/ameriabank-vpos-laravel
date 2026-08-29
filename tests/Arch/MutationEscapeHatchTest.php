@@ -8,20 +8,35 @@ use Symfony\Component\Console\Input\ArgvInput;
 use Symfony\Component\Console\Input\InputDefinition;
 
 /*
- * The zero-mutation escape hatch may not outlive its reason.
+ * The zero-mutation escape hatch may not outlive its reason — and it did not.
  *
- * `composer mutate` carries --ignore-min-score-on-zero-mutations only because
- * the package currently ships one final class holding a constant and an empty
- * register(), which generates no mutants at all. The plugin's
- * MutationRepository::score() returns 0 when total() === 0, so an unguarded run
- * scores 0.00% against a floor of 100 and exits 1. The flag suppresses that one
- * case and nothing else — the floor stays --min=100 — and it goes inert the
- * moment real production code appears.
+ * `composer mutate` once carried --ignore-min-score-on-zero-mutations, for a
+ * reason that was narrow and openly temporary. The package shipped a single
+ * final class holding a constant and an empty register(), which generates no
+ * mutants at all, and the plugin's MutationRepository::score() returns 0 when
+ * total() === 0 — so an unguarded run scored 0.00% against a floor of 100 and
+ * exited 1. The flag suppressed that one case and nothing else; the floor
+ * stayed --min=100 throughout.
  *
- * "Inert" is not "harmless": a flag left in place after the package grows would
- * silently absolve a future `src/` that produced no mutants for the wrong
- * reason. A note in a later task's preconditions is not enough, so the
- * expiry is asserted here instead.
+ * That reason has since expired. `src/` now carries real production code, the
+ * flag is gone from composer.json, and the mutation gate is scored against
+ * mutants that actually exist. This guard is why the removal happened when the
+ * reason ended rather than whenever somebody next happened to re-read the
+ * script.
+ *
+ * It stays because the removal is not self-sustaining. "Inert" was never
+ * "harmless": the flag re-added — restored from an old branch, copied from the
+ * package this one was modelled on, or reached for the next time a run reports
+ * no mutants — would silently absolve a `src/` that produced none for the wrong
+ * reason: a broken --path, a renamed namespace, a filter matching nothing. That
+ * failure has no other symptom, because it fails green. A note in a document
+ * somebody has to read first is not enforcement, so the rule is asserted here
+ * instead.
+ *
+ * The assertion is unchanged in either direction, and deliberately so: the flag
+ * and mutatable production code may not both be present. Today the flag is
+ * absent, so it passes against a `src/` that declares many mutatable methods;
+ * put the flag back and it fails, naming the methods it found.
  *
  * Why this is a reflection guard and not an arch() expectation: the rule
  * relates production code to the *build manifest*, and no arch() expectation

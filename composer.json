@@ -21,6 +21,7 @@
     "require": {
         "php": "^8.3",
         "davit-vardanyan/ameriabank-vpos-php": "^1.0.1",
+        "illuminate/console": "^12.0 || ^13.0",
         "illuminate/contracts": "^12.0 || ^13.0",
         "illuminate/http": "^12.0 || ^13.0",
         "illuminate/support": "^12.0 || ^13.0"
@@ -67,6 +68,9 @@
     },
     "extra": {
         "laravel": {
+            "aliases": {
+                "Vpos": "DavitVardanyan\\AmeriabankVpos\\Laravel\\Facades\\Vpos"
+            },
             "providers": [
                 "DavitVardanyan\\AmeriabankVpos\\Laravel\\AmeriabankVposServiceProvider"
             ]
@@ -78,7 +82,7 @@
         "coverage:check": "@php -r \"\\$x = simplexml_load_file('build/clover.xml'); \\$m = \\$x->project->metrics; \\$c = (int) \\$m['coveredstatements']; \\$t = (int) \\$m['statements']; \\$p = \\$t > 0 ? 100 * \\$c / \\$t : 0.0; printf('Line coverage: %.2f%% (%d/%d)' . PHP_EOL, \\$p, \\$c, \\$t); exit(\\$p < 100.0 ? 1 : 0);\"",
         "cs": "pint",
         "cs:check": "pint --test",
-        "mutate": "pest --mutate --path=src --min=100 --ignore-min-score-on-zero-mutations",
+        "mutate": "pest --mutate --path=src --min=100",
         "rector": "rector process --dry-run",
         "stan": "phpstan analyse",
         "test": "pest"
