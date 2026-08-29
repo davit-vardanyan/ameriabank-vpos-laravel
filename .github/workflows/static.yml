@@ -1,0 +1,48 @@
+name: Static analysis
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: PHP 8.3 / Laravel 13
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: curl, dom, json, mbstring
+          coverage: none
+          ini-values: error_reporting=E_ALL
+
+      # No `composer require --no-update` pin step here, deliberately.
+      # It would rewrite composer.json, and the first two checks below read
+      # composer.json as the artifact under test — they would then be checking
+      # a file this workflow had just edited. Laravel 13 arrives without a pin:
+      # `dependency-versions: highest` resolves orchestra/testbench to ^11,
+      # which requires laravel/framework ^13.23.
+      - uses: ramsey/composer-install@v3
+        with:
+          dependency-versions: highest
+
+      - name: Validate composer.json
+        run: composer validate --strict
+
+      - name: Check composer.json is normalized
+        run: composer normalize --dry-run
+
+      - name: PHPStan
+        run: composer stan
+
+      - name: Pint
+        run: composer cs:check
+
+      - name: Rector
+        run: composer rector

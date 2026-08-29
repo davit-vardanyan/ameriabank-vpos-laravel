@@ -1,0 +1,86 @@
+{
+    "name": "davit-vardanyan/ameriabank-vpos-laravel",
+    "description": "Laravel integration for the unofficial Ameriabank vPOS 3.1 client.",
+    "license": "MIT",
+    "type": "library",
+    "keywords": [
+        "laravel",
+        "ameriabank",
+        "vpos",
+        "payment",
+        "gateway",
+        "armenia",
+        "arca"
+    ],
+    "authors": [
+        {
+            "name": "Davit Vardanyan",
+            "homepage": "https://github.com/davit-vardanyan"
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "davit-vardanyan/ameriabank-vpos-php": "^1.0.1",
+        "illuminate/contracts": "^12.0 || ^13.0",
+        "illuminate/http": "^12.0 || ^13.0",
+        "illuminate/support": "^12.0 || ^13.0"
+    },
+    "require-dev": {
+        "ergebnis/composer-normalize": "^2.45",
+        "larastan/larastan": "^3.0",
+        "laravel/pint": "^1.24",
+        "orchestra/testbench": "^10.0 || ^11.0",
+        "pestphp/pest": "^4.0",
+        "pestphp/pest-plugin-arch": "^4.0",
+        "pestphp/pest-plugin-laravel": "^4.0",
+        "pestphp/pest-plugin-mutate": "^4.0",
+        "phpstan/extension-installer": "^1.4",
+        "phpstan/phpstan": "^2.2",
+        "phpstan/phpstan-deprecation-rules": "^2.0",
+        "phpstan/phpstan-strict-rules": "^2.0",
+        "rector/rector": "^2.0",
+        "roave/backward-compatibility-check": "^8.0"
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "autoload": {
+        "psr-4": {
+            "DavitVardanyan\\AmeriabankVpos\\Laravel\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "DavitVardanyan\\AmeriabankVpos\\Laravel\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "ergebnis/composer-normalize": true,
+            "pestphp/pest-plugin": true,
+            "php-http/discovery": true,
+            "phpstan/extension-installer": true
+        },
+        "platform": {
+            "php": "8.3.2"
+        },
+        "sort-packages": true
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "DavitVardanyan\\AmeriabankVpos\\Laravel\\AmeriabankVposServiceProvider"
+            ]
+        }
+    },
+    "scripts": {
+        "bc": "roave-backward-compatibility-check",
+        "coverage": "pest --coverage-clover=build/clover.xml --coverage",
+        "coverage:check": "@php -r \"\\$x = simplexml_load_file('build/clover.xml'); \\$m = \\$x->project->metrics; \\$c = (int) \\$m['coveredstatements']; \\$t = (int) \\$m['statements']; \\$p = \\$t > 0 ? 100 * \\$c / \\$t : 0.0; printf('Line coverage: %.2f%% (%d/%d)' . PHP_EOL, \\$p, \\$c, \\$t); exit(\\$p < 100.0 ? 1 : 0);\"",
+        "cs": "pint",
+        "cs:check": "pint --test",
+        "mutate": "pest --mutate --path=src --min=100 --ignore-min-score-on-zero-mutations",
+        "rector": "rector process --dry-run",
+        "stan": "phpstan analyse",
+        "test": "pest"
+    }
+}

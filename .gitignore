@@ -1,0 +1,29 @@
+# --- secrets ---------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+
+# --- dependencies ----------------------------------------------------------
+/vendor/
+# composer.lock is intentionally NOT committed: this is a library, not an app.
+composer.lock
+
+# --- tool caches -----------------------------------------------------------
+.phpunit.result.cache
+.phpunit.cache/
+.phpstan.cache/
+.pint.cache
+/build/
+/coverage/
+
+# --- local tooling and working notes ---------------------------------------
+# Not part of the published package. These stay on disk; git just stops
+# tracking them.
+.claude/
+CLAUDE.md
+
+# --- editors / OS ----------------------------------------------------------
+.idea/
+.vscode/
+.DS_Store
+*.swp
