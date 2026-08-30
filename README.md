@@ -330,40 +330,119 @@ not touch those.
 ## `php artisan vpos:check`
 
 ```bash
+# Preferred. Asks about an order you registered yourself.
+php artisan vpos:check --order-id=1749
+
+# Blind. Detects a rejection and nothing else.
 php artisan vpos:check
 ```
 
 It prints the resolved environment, the gateway base URL, a truncated ClientID
 and username, whether a password is set, and the resolved `BackURL` — and then
-**makes one real HTTP request** to the gateway, asking `GetPaymentDetails` about
-an all-zero probe `PaymentID` that cannot belong to any merchant.
+**makes one real HTTP request** to the gateway: a single `GetPaymentId` call for
+one `OrderID`. A configuration that will not resolve is refused before anything
+is sent.
 
-**It does not prove the credentials are valid, and it does not claim to.** What
-it establishes is narrower, and worth stating exactly:
+### The gateway offers no reliable credential check
 
-| Outcome | What it proves | Exit |
-|---|---|---|
-| The gateway answered response code 20, or refused authentication | the credentials **are rejected** | 1 |
-| The gateway answered a success code | the credentials **are valid** — nothing but an authenticated caller gets one | 0 |
-| The gateway answered a fault, or response code `550` | **nothing either way** | 0 |
-| The request never arrived | nothing; the gateway was not reached | 1 |
-| The configuration would not resolve | the configuration is wrong, and which value | 1 |
+State this first, because everything below is shaped by it. **No Ameriabank vPOS
+operation this package can safely call reliably distinguishes valid credentials
+from invalid ones.** On the one endpoint where the question has been studied, a
+wrong password has been observed producing the same gateway fault envelope that
+correct credentials produced on that same payment, and the same response code
+`550` that correct credentials produced on another — so neither reply separates
+the two, and neither can be read as a pass.
 
-The third row is the one to read carefully. The core client records the same
-fault envelope, and the same `550`, arriving in answer to a **wrong password** as
-in answer to an unknown payment, so neither reply distinguishes the two. On those
-answers the command prints a caveat instead of a verdict, and exits 0 because the
-request did reach the gateway and was processed — which is what a working
-configuration looks like, and all that was actually shown.
+`InitPayment` is the only operation with an unambiguous credential rejection, and
+it is **barred from a diagnostic because it registers a real order**. A command
+that checks your credentials by creating an order is not a check.
 
-So `vpos:check` proves that the gateway is reachable and that your configuration
-resolves; it detects an outright rejection; and where the answer settles nothing,
-it says so rather than reporting success.
+**No probe has ever reached either production host.** Every observation this
+command rests on comes from the sandbox, so a `vpos:check` result against
+`production` has no observational backing at all.
 
-Nothing secret is printed. The password is reported only as `(set)` or
-`(not set)` and is never read into a message; the ClientID and username are
-truncated to their first four characters, which is enough to tell two credential
-sets apart in a screenshot and not enough to use.
+The command prints both caveats itself rather than leaving them in this file: the
+standing one on every run, including the run that rejects a malformed
+`--order-id` without sending anything, and the production one beside the verdict
+whenever the resolved environment is `production`.
+
+### The two modes
+
+**`--order-id=<an order you registered>` — prefer this one.** It lands in the one
+cell where a paired experiment exists: for an order the merchant owns, correct
+credentials answered a success code and a `PaymentId`, and a wrong password
+answered response code 20. A success code here is genuine evidence — the gateway
+authenticated this ClientID, username and password and looked that order up under
+them.
+
+That rests on a premise the command cannot check: that the `OrderID` you pass is
+one **you** registered, under **this** ClientID. Pass an arbitrary number and you
+are back in the blind cell below, holding an exit 0. The command says so in the
+verdict, and the answer is to pass an order you own.
+
+**Blind (no option) — rejection-detection only.** The probe asks about a sentinel
+`OrderID` no merchant can own; it is negative, and merchants number orders from
+an ascending counter. Response code 20 is still **read as** a rejection, and the
+gateway's own message is printed with it — that is an inference rather than an
+observation, since only a known `OrderID` has ever been observed being answered
+20, and it is the safe direction for a diagnostic to take. A success code proves
+**nothing**, because what the gateway answers for an `OrderID` it does not know
+has never been observed under *either* credential state — there is nothing to
+compare the reply against.
+
+Use `--order-id` whenever you have an order number to hand. It is the only mode
+that can return a positive answer at all.
+
+### What each answer establishes
+
+| Mode | Gateway answer | What it proves | Exit |
+|---|---|---|---|
+| `--order-id` | a success code | the credentials **are valid** | 0 |
+| `--order-id` | response code 20 | the credentials **are rejected** | 1 |
+| blind | a success code | **nothing** — inconclusive | 2 |
+| either | response code 20, as the integer `20` or the string `"20"` | the credentials **are rejected** | 1 |
+| either | a gateway fault envelope | nothing — on the one endpoint where it was studied, a wrong password produced the same fault as correct credentials | 2 |
+| either | response code `550` | nothing — `550` is overloaded, and on that same endpoint a wrong password produced it too | 2 |
+| either | any other response code | nothing; the code and the gateway's own message are reported | 2 |
+| either | the gateway could not be reached | nothing; nothing arrived | 2 |
+| either | a reply this client cannot read | nothing | 2 |
+| either | any other failure, named by its class | nothing; the run stopped before it could establish anything | 2 |
+| either | the configuration would not resolve, an out-of-range `max_attempts` included | the configuration is wrong, and which value | 1 |
+| neither | `--order-id` was given something that is not an integer | nothing; nothing was sent | 2 |
+
+**Exit 0 only when the credentials are proven valid. Exit 1 only when they are
+proven rejected. Everything else is exit 2.**
+
+Exit 2 is a separate code rather than exit 0 with a caveat in the output, because
+**a CI pipeline reads the exit code, not the prose**. `vpos:check && deploy` must
+not pass on a probe that established nothing: a merchant with a typo'd password
+would see a green pipeline and deploy. A caveat only a human reads is not a
+result a script can act on.
+
+### Why the probe is `GetPaymentId`
+
+The decisive reason is not how well the candidates discriminate a bad credential.
+It is that **`GetPaymentDetails` never puts the ClientID on the wire at all** —
+its request declares that it does not require one — so a merchant who has typed
+their ClientID wrongly is *structurally undetectable* on it, under any gateway
+behaviour rather than merely under the behaviours anyone has observed.
+`GetPaymentId` sends the ClientID.
+
+Secondarily, `GetPaymentId` is also the only operation ever observed returning a
+genuine credential rejection, and this command reads that rejection in both wire
+forms: the integer `20` the core client classifies, and the string `"20"` this
+endpoint has actually been seen to send.
+
+### What is never printed
+
+Nothing secret, and nothing belonging to a real order. The password is reported
+only as `(set)` or `(not set)` and is never read into a message; the ClientID and
+username are truncated to their first four characters, which is enough to tell
+two credential sets apart in a screenshot and not enough to use. **The
+`PaymentId` the gateway returns is never printed, in either mode** — it
+identifies a real payment, and this output goes into terminals and CI logs. A
+reply the client cannot parse is not echoed either: a raw response body is
+unvalidated remote content.
 
 ## Credentials
 

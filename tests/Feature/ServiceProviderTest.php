@@ -150,5 +150,5 @@ it('registers the check command under its documented signature and description',
     }
 
     expect($command->getDescription())
-        ->toBe('Verify the configured Ameriabank vPOS credentials. Makes one real HTTP request to the gateway.');
+        ->toBe('Ask the Ameriabank vPOS gateway what it says about the configured credentials. Makes one real HTTP request.');
 });

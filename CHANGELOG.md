@@ -44,14 +44,39 @@ and this project adheres to
   second names the value — it is never allowed to fall through to an empty
   `BackURL`, which the gateway accepts and then sends the customer nowhere.
 - `php artisan vpos:check`, which reports the resolved configuration and makes
-  **one real HTTP request** to the gateway. It proves the gateway is reachable
-  and that the configuration resolves, and it detects an outright rejection
-  (response code 20). It does **not** claim to prove credentials are valid: the
-  core client records a gateway fault and response code `550` arriving in answer
-  to a wrong password exactly as they do in answer to an unknown payment, so on
-  those two replies the command prints a caveat rather than a verdict. The
-  password is never read into a message and the ClientID and username are
-  truncated to four characters.
+  **one real HTTP request** to the gateway — a single `GetPaymentId` call. It
+  exits 0 only when the credentials are proven valid, 1 only when they are
+  proven rejected, and 2 whenever the answer establishes neither. **Anything
+  scripting against it must treat 2 as a distinct, non-fatal "cannot tell":**
+  `vpos:check && deploy` must not pass on a probe that established nothing, and a
+  gateway fault, response code `550`, any other non-rejection response code, an
+  unreachable gateway, a reply the client cannot read and a blind success code
+  are all 2. A caveat in the output is not a result a pipeline can read; the exit
+  code is. An out-of-range `max_attempts` is exit 1, named as the configuration
+  mistake it is, and no exception escapes the command as a stack trace — one that
+  did would exit 1 and so publish a rejection the gateway never gave. The
+  password is never read into a message, the ClientID and username are truncated
+  to four characters, and the `PaymentId` the gateway returns is never printed.
+- The probe operation is **`GetPaymentId`**. The decisive reason is not
+  credential discrimination: `GetPaymentDetails` never puts the ClientID on the
+  wire at all, so a merchant who typos their ClientID is structurally
+  undetectable on it under any gateway behaviour. `GetPaymentId` sends the
+  ClientID. Secondarily, it is also the only operation ever observed returning a
+  genuine credential rejection, and the command reads that rejection in both wire
+  forms — the integer `20` and the string `"20"`.
+- `--order-id=` on `vpos:check`, naming an order the merchant registered. It is
+  the only mode that can prove the credentials valid: for a known order, correct
+  credentials have been observed answering a success code and a `PaymentId` while
+  a wrong password answered response code 20 — a premise the command cannot
+  check, and restates in the verdict. Without the option the command probes a
+  sentinel `OrderID` no merchant can own, which detects a rejection and nothing
+  else. Every run names the mode it ran in and states plainly that the gateway
+  offers no reliable credential check: no operation the package can safely call
+  reliably separates valid credentials from invalid ones, and `InitPayment`, the
+  only one with an unambiguous rejection, is barred from a diagnostic because it
+  registers a real order. No probe has ever reached either production host, so a
+  result against `production` has no observational backing, and the command says
+  so beside the verdict.
 - Quality gate: PHPStan level 10 with Larastan and no baseline, Pint on the
   `laravel` preset with `declare_strict_types`, Rector, Pest 4 under Orchestra
   Testbench, 100% line coverage, and `pest-plugin-mutate` at MSI 100 with the

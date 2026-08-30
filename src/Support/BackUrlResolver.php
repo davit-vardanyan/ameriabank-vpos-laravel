@@ -65,6 +65,21 @@ final readonly class BackUrlResolver
      * more than silently accepting a spelling nothing else in the application
      * uses.
      *
+     * **One route-name mistake is not converted, and is documented rather than
+     * mistranslated.** An unregistered route name arrives as an
+     * `InvalidArgumentException` and is caught below. A route name that *is*
+     * registered but declares required parameters does not: the URL generator
+     * raises `UrlGenerationException`, which extends `Exception` directly. It
+     * therefore leaves this method as the framework's own exception. Routing it
+     * into the factory below would print that the value is "neither an absolute
+     * URL nor the name of a registered route", which is false — it is the name
+     * of a registered route — and would send the reader looking for a typo that
+     * is not there. `back_url` receives a plain redirect target with no
+     * parameters this package can supply, so the honest report is a distinct
+     * one naming that; it needs a factory this class may not add, and until
+     * that exists the framework's exception, which names the route and the
+     * missing parameter, is more informative than a wrong sentence.
+     *
      * @throws ConfigurationException when the value is blank, or names a route this application has not registered
      */
     public function resolve(): string

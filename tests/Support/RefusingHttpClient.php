@@ -25,19 +25,63 @@ use function sprintf;
  * transport catches that interface and translates it into a TransportException,
  * which the check command reports as "could not reach the gateway" — a green,
  * plausible line that would hide the fact that a test had tried to leave the
- * machine. An ordinary RuntimeException passes through every catch clause in
- * the client and fails the test where the attempt was made.
+ * machine.
+ *
+ * ## The refusal is also recorded, because throwing is no longer enough
+ *
+ * Raising an ordinary RuntimeException used to be sufficient: it passed through
+ * every catch clause in the client package and failed the test where the attempt
+ * was made. `CheckCommand::handle()` now ends in a `catch (Throwable)` clause,
+ * which is right — an unclassified failure must not leave that command on exit 1,
+ * the code that means the gateway refused the merchant's credentials — but it
+ * catches this refusal along with everything else and converts it into exit 2 and
+ * an "unexpected RuntimeException" line, which several tests assert on their own
+ * account. A test that forgot to bind a stub would have gone green while trying
+ * to talk to the bank.
+ *
+ * So the attempt is written down before it is thrown, where no catch clause can
+ * reach it, and tests/Pest.php fails the test that made it. The exception is
+ * still raised: it is what stops the request, and it is the better failure for
+ * every caller that does not swallow it.
  */
 final class RefusingHttpClient implements ClientInterface
 {
+    /**
+     * Every request this suite tried to actually send, since the last reset.
+     *
+     * @var list<string>
+     */
+    private static array $attempts = [];
+
     public function sendRequest(RequestInterface $request): ResponseInterface
     {
+        $attempt = sprintf('%s %s', $request->getMethod(), $request->getUri()->__toString());
+
+        self::$attempts[] = $attempt;
+
         throw new RuntimeException(sprintf(
-            'A test attempted a real HTTP request: %s %s. No test in this suite may reach the '
+            'A test attempted a real HTTP request: %s. No test in this suite may reach the '
             .'network. Bind a %s into the container before the exchange.',
-            $request->getMethod(),
-            $request->getUri()->__toString(),
+            $attempt,
             StubHttpClient::class,
         ));
+    }
+
+    /**
+     * The requests this suite tried to send, in order.
+     *
+     * @return list<string>
+     */
+    public static function attempts(): array
+    {
+        return self::$attempts;
+    }
+
+    /**
+     * Empties the log, so one test's attempt cannot fail the next one.
+     */
+    public static function forgetAttempts(): void
+    {
+        self::$attempts = [];
     }
 }
