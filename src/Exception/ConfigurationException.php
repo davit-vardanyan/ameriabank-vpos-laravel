@@ -117,6 +117,40 @@ final class ConfigurationException extends LogicException implements VposExcepti
     }
 
     /**
+     * `back_url` names a route this application has registered, but that route
+     * declares required parameters.
+     *
+     * A separate factory from the one above, and deliberately so. The message
+     * above would be false here — the value *is* the name of a registered
+     * route — and it would send the reader hunting for a typo in a spelling
+     * that is correct. What is wrong is the route that was chosen, not the
+     * name that was typed, and the two mistakes have different remedies.
+     *
+     * Neither the route's URI pattern nor the parameter it wanted is repeated
+     * here. This class composes its own sentences out of what it was handed,
+     * and the only source for either of those is the framework's message,
+     * which would have to be parsed back apart — a string another package is
+     * free to reword. The cause carries both intact, which is why it is
+     * chained, and the message says so rather than leaving it to be guessed.
+     *
+     * @param  string  $value  The configured value, verbatim. Not a credential.
+     */
+    public static function parameterisedBackUrlRoute(string $value, Throwable $previous): self
+    {
+        return new self(
+            sprintf(
+                'ameriabank-vpos.back_url is "%s", which names a route this application has registered, but '
+                .'that route declares required parameters and this package has none to give it. The BackURL is '
+                .'the address the gateway returns the customer to, so it has to resolve on its own: point '
+                .'ameriabank-vpos.back_url (AMERIABANK_VPOS_BACK_URL) at a route that takes no required '
+                .'parameters, or at an absolute http or https URL. The cause names the route and what it wanted.',
+                $value,
+            ),
+            $previous,
+        );
+    }
+
+    /**
      * A VposCallback was resolved where no vPOS callback exists.
      *
      * The core's message names the field that was missing, which is the right

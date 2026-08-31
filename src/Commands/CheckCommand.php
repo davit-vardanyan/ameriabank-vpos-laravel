@@ -168,15 +168,30 @@ final class CheckCommand extends Command
      * assigned before the try and overwritten inside it is unobservable, and an
      * unobservable value is one no test can pin.
      *
+     * **The mode is computed once and handed to every inconclusive branch.**
+     * Those branches say what was not established and what to do about it, and
+     * a run that was blind has a second thing to do about it whatever went
+     * wrong: no reply that run could have received would have proved the
+     * credentials valid, because the cell it probed is unobserved under both
+     * credential states. That is a fact about the invocation rather than about
+     * the failure, so it belongs in the branch's own output rather than in the
+     * mode note the operator read several lines and one send earlier — the
+     * same reasoning `proven()` gives for restating its ownership premise.
+     *
+     * `unusableOrderId()` is not one of them and takes no mode. It returns
+     * above, before any mode note is printed, and names the option in its own
+     * message; there is no scrollback for it to depend on.
+     *
      * The last clause catches `Throwable`, and it is ordered last so that it
      * cannot shadow the specific ones. Everything above it names a condition
      * this command understands; that one exists because an exception nobody
      * listed would otherwise leave the command on Laravel's default handling,
      * which prints a stack trace and exits **1** — and exit 1 here is the
-     * specific claim that the gateway refused these credentials. A route name
-     * in `back_url` that needs parameters reaches it today: the URL generator
-     * raises a framework exception that is not an `InvalidArgumentException`,
-     * so the resolver does not convert it.
+     * specific claim that the gateway refused these credentials. No path
+     * through this package's own configuration reaches it any more: a route
+     * name in `back_url` that needs parameters did, and is now converted by
+     * the resolver into a named configuration failure like every other
+     * `back_url` mistake.
      */
     public function handle(Application $app, Repository $config, BackUrlResolver $backUrl): int
     {
@@ -195,6 +210,7 @@ final class CheckCommand extends Command
         }
 
         $orderId = $requestedOrderId ?? $sentinelOrderId;
+        $blind = $requestedOrderId === null;
 
         $this->line($requestedOrderId === null
             ? $this->blindModeNote($sentinelOrderId)
@@ -222,19 +238,19 @@ final class CheckCommand extends Command
         } catch (AuthenticationException $failure) {
             return $this->rejected($failure->responseCode(), $failure->responseMessage());
         } catch (ApiException $failure) {
-            return $this->apiAnswer($failure);
+            return $this->apiAnswer($failure, $blind);
         } catch (GatewayFaultException $failure) {
-            return $this->faulted($failure->getMessage());
+            return $this->faulted($failure->getMessage(), $blind);
         } catch (TransportException $failure) {
-            return $this->unreachable($failure->getMessage());
+            return $this->unreachable($failure->getMessage(), $blind);
         } catch (SerializationException|IndeterminateStateException $failure) {
-            return $this->unreadable($failure->getMessage());
+            return $this->unreadable($failure->getMessage(), $blind);
         } catch (ClientConfigurationException|ConfigurationException $failure) {
             return $this->misconfigured($failure->getMessage());
         } catch (ValidationException $failure) {
             return $this->attemptBudgetRefused($config, $failure->getMessage());
         } catch (Throwable $failure) {
-            return $this->unexpected($failure::class);
+            return $this->unexpected($failure::class, $blind);
         }
     }
 
@@ -387,8 +403,11 @@ final class CheckCommand extends Command
      * Everything else lands on the inconclusive line, `"550"` included: the
      * client records that code arriving from both a wrong password and correct
      * credentials, so it distinguishes nothing and gets no branch of its own.
+     *
+     * The blind pointer is added to that line and not to the rejection above
+     * it: a rejection is a verdict, and the mode does not change it.
      */
-    private function apiAnswer(ApiException $failure): int
+    private function apiAnswer(ApiException $failure, bool $blind): int
     {
         $code = $failure->responseCode();
 
@@ -405,6 +424,8 @@ final class CheckCommand extends Command
             $code,
             $this->orPlaceholder($failure->responseMessage()),
         ));
+
+        $this->pointBlindRunAtOrderId($blind);
 
         return self::INVALID;
     }
@@ -439,7 +460,7 @@ final class CheckCommand extends Command
      * observed from GetPaymentId at all. Saying so plainly costs a clause and
      * keeps this command's output the kind of source it is read as.
      */
-    private function faulted(string $message): int
+    private function faulted(string $message, bool $blind): int
     {
         $this->warn(sprintf(
             'Inconclusive. The gateway answered with a fault envelope rather than a response code, so it never '
@@ -451,6 +472,8 @@ final class CheckCommand extends Command
             self::PROBE_OPERATION,
             $message,
         ));
+
+        $this->pointBlindRunAtOrderId($blind);
 
         return self::INVALID;
     }
@@ -548,7 +571,7 @@ final class CheckCommand extends Command
     /**
      * Nothing was learned about the credentials, because nothing arrived.
      */
-    private function unreachable(string $message): int
+    private function unreachable(string $message, bool $blind): int
     {
         $this->warn(sprintf(
             'Inconclusive. Could not reach the gateway, so nothing was learned about the credentials. %s Check '
@@ -556,6 +579,8 @@ final class CheckCommand extends Command
             .'are the usual three — and re-run.',
             $message,
         ));
+
+        $this->pointBlindRunAtOrderId($blind);
 
         return self::INVALID;
     }
@@ -596,7 +621,7 @@ final class CheckCommand extends Command
      * the response body (CONVENTIONS.md §6, and the raw body is unvalidated
      * remote content that must not reach a terminal or a log).
      */
-    private function unreadable(string $message): int
+    private function unreadable(string $message, bool $blind): int
     {
         $this->warn(sprintf(
             'Inconclusive. The exchange did not produce a reply this command could read, so nothing about the '
@@ -605,6 +630,8 @@ final class CheckCommand extends Command
             .'operation, the time and the environment to Ameriabank — nothing here points at your configuration.',
             $message,
         ));
+
+        $this->pointBlindRunAtOrderId($blind);
 
         return self::INVALID;
     }
@@ -630,11 +657,13 @@ final class CheckCommand extends Command
      * the honest code, and the message says nothing about credentials in
      * either direction.
      *
-     * Two routes reach it today. One is configuration: a `back_url` naming a
-     * route that takes required parameters makes the URL generator raise a
-     * framework exception the resolver does not convert. The other is any
-     * exception a merchant's own PSR-18 client raises that the client package's
-     * transport does not wrap.
+     * One route reaches it today: any exception a merchant's own PSR-18 client
+     * raises that the client package's transport does not wrap. There was a
+     * second, from configuration — a `back_url` naming a route that takes
+     * required parameters — and it has been closed, because the resolver now
+     * converts that into a named configuration failure. A clause that exists
+     * for the failures nobody listed is not made redundant by the list growing;
+     * it is the reason the list can grow safely.
      *
      * **The class is named and the message is not.** A class name is a fixed
      * string chosen by whoever wrote the class, and it is what makes the
@@ -645,7 +674,7 @@ final class CheckCommand extends Command
      * exceptions have their messages printed because this package knows what
      * they contain; an unclassified one gets no such assumption.
      */
-    private function unexpected(string $class): int
+    private function unexpected(string $class, bool $blind): int
     {
         $this->warn(sprintf(
             'Inconclusive. The run failed with an unexpected %s before it could establish anything, so nothing '
@@ -656,31 +685,159 @@ final class CheckCommand extends Command
             $class,
         ));
 
+        $this->pointBlindRunAtOrderId($blind);
+
         return self::INVALID;
     }
 
     /**
-     * The client refused the configured attempt budget.
+     * Tells a blind run that the other mode is the one that could have answered.
      *
-     * The only ValidationException this exchange can raise: the OrderID is an
-     * integer by signature, and a blank credential is refused as a
-     * configuration error rather than a validation one. So it is always
-     * `max_attempts`, which comes from the package configuration file and from
-     * nowhere else — a configuration mistake, reported as one and named, rather
-     * than left to escape as an unrendered stack trace.
+     * Printed as its own line rather than appended to the branch above it. The
+     * alternative — a `%s` at the end of each message holding either the clause
+     * or an empty string — puts a `''` literal in the source on the path that
+     * must print nothing, and an empty string that silently becomes a non-empty
+     * one is invisible to an assertion written as "does not contain the
+     * pointer". A statement that is either executed or not is observable from
+     * both sides.
      *
-     * The value reported is the one the client was actually given, which is 0
-     * for anything that is not an integer; the configured text is not echoed
-     * back, because what matters is what reached the client.
+     * **It goes on all five inconclusive branches, including the two where a
+     * re-run in the other mode plainly will not help.** An unroutable host
+     * stays unroutable and a fault stays a fault, so the clause is written to
+     * claim only what is true of every one of them: this run could not have
+     * proved the credentials valid whatever it received, because the blind
+     * probe asks about an OrderID no merchant registered and the reply to one
+     * of those is unobserved under both credential states. Withholding it from
+     * some rows would mean deciding, per condition, whether the operator's next
+     * attempt is worth making — a judgement this command cannot make for them,
+     * and one whose absence reads exactly like the gap this clause closes.
+     *
+     * Not printed on the rejection, the proven verdict or the configuration
+     * refusals: each of those is an answer, and the mode does not change it.
+     * Not printed by `unusableOrderId()` either — that path returns before any
+     * mode is chosen and names the option itself.
+     *
+     * Not printed by `blindSuccess()` either, which is a sixth inconclusive row
+     * rather than one of the five above. It can arise in no other mode, so a
+     * clause conditional on the mode would be an unconditional one wearing a
+     * disguise, and its own message already ends by naming the option. The
+     * exclusion is recorded here because this is the list a reader consults,
+     * and an enumeration that omits a case reads as an oversight rather than
+     * as a decision.
+     */
+    private function pointBlindRunAtOrderId(bool $blind): void
+    {
+        if ($blind) {
+            $this->warn(
+                'This run was also blind: no answer it could have received would have proved the credentials '
+                .'valid, because the reply to an OrderID the gateway does not know is unobserved under both '
+                .'credential states. Re-run with --order-id set to an order you registered — that is the only '
+                .'mode whose answer can prove them.',
+            );
+        }
+    }
+
+    /**
+     * The client refused a configured value, named when it can be named.
+     *
+     * The attempt budget is the only `ValidationException` a `GetPaymentId`
+     * exchange can provoke today, and it comes from one configuration key and
+     * nowhere else — so when it is the one that arrived, this says which key
+     * and which environment variable, because that is what the operator has to
+     * go and change.
+     *
+     * **It is established rather than assumed.** The previous version printed
+     * that message for every `ValidationException` reaching `handle()`, on a
+     * reading of the client package's call sites that was correct when it was
+     * made and held by nothing afterwards. The client is separately versioned:
+     * `GetPaymentIdRequest` takes an unchecked `int $orderId`, so a range check
+     * added upstream would turn the blind probe's own sentinel into a message
+     * sending the merchant to inspect an environment variable they never set —
+     * confidently, in the first sentence, which is the one acted on.
+     *
+     * **The test is the client's own factory, not a copy of its wording.**
+     * `ValidationException::maxAttemptsOutOfRange()` is built here with the
+     * value this command's configuration would have handed the client, and its
+     * message is compared with the one that arrived. A literal would have to be
+     * kept in step with a `sprintf()` in another package by hand, and would go
+     * silently stale in the direction that keeps naming `max_attempts`.
+     *
+     * Comparing against the *configured* value rather than against the factory
+     * in general is deliberate. A refusal of some other number is not a refusal
+     * of what this configuration asked for, and this command cannot say which
+     * key produced it, so it takes the generic branch and prints the client's
+     * words rather than guessing.
+     *
+     * Both branches exit 1. A value this package's configuration handed the
+     * client and the client refused is a fact about the merchant's
+     * configuration, not a guess about their credentials, whichever value it
+     * turns out to be.
      */
     private function attemptBudgetRefused(Repository $config, string $message): int
     {
-        $value = $config->get(self::CONFIG_KEY.'.max_attempts');
+        $configured = $this->configInt($config, 'max_attempts');
+
+        if ($message !== ValidationException::maxAttemptsOutOfRange($configured)->getMessage()) {
+            return $this->configuredValueRefused($message);
+        }
 
         $this->error(sprintf(
             'The Ameriabank vPOS configuration is not usable. ameriabank-vpos.max_attempts '
             .'(AMERIABANK_VPOS_MAX_ATTEMPTS) reached the client as %d, and the client refused it. %s',
-            is_int($value) ? $value : 0,
+            $configured,
+            $message,
+        ));
+
+        return self::FAILURE;
+    }
+
+    /**
+     * The client refused something this command cannot name.
+     *
+     * No key and no environment variable is named, because naming one would be
+     * the assumption this branch exists to stop making. **Nothing is claimed
+     * about what was refused either.** `blankValue()` and `malformedValue()`
+     * name a field and no value at all, and `callbackOrderMismatch()` says
+     * outright that neither value is reported — so a sentence promising the
+     * rejected value would be false for several of the factories the client
+     * ships, in the one line an operator acts on.
+     *
+     * **Nor about when it was refused.** Every factory reachable on this
+     * exchange today raises before the request is dispatched, but that is a
+     * reading of one version of a separately versioned package — the same
+     * class of claim `attemptBudgetRefused()` above stopped making, and not
+     * one to reintroduce a level down where the wording is looser and nothing
+     * checks it. `GetPaymentIdResponse` is built from the reply *after* the
+     * send on this very call path, and the client already raises a
+     * `ValidationException` after a send elsewhere, in `Vpos::verify()`.
+     * "Nothing was sent", printed about a run that sent something, is a
+     * stronger and more damaging claim than naming the wrong key.
+     *
+     * **The client's own words are still printed whole, and the reason is not
+     * that their content is known.** They belong to the *client* package's
+     * exception type, not this one's, and taking its contents as known is the
+     * assumption this branch exists to end. They are printed because it is
+     * classified: the client raised its own named refusal, deliberately, at a
+     * point it chose. `unexpected()` withholds the message of an exception
+     * nobody classified for the opposite reason — that one is composed at a
+     * throw site out of whatever happened to be in scope there. The words are
+     * the only evidence this branch has, so they are passed through unedited
+     * and every sentence around them is written to claim nothing about them.
+     *
+     * Exit 1, grouped with the named refusal above it because both stop on a
+     * refusal the operator has an account of and can act on — not because this
+     * branch has established that the refused value was configured. It cannot
+     * establish that, which is why the message says so in words.
+     */
+    private function configuredValueRefused(string $message): int
+    {
+        $this->error(sprintf(
+            'The Ameriabank vPOS configuration is not usable. The client raised a validation refusal, and this '
+            .'command cannot tell what it refused, which setting the refused input came from, or whether it came '
+            .'from a setting at all — the client\'s own words are the whole of what is known here. %s Check the '
+            .'ameriabank-vpos configuration against that message; if nothing there matches, the refusal is not '
+            .'about a value you set, and this output is worth reporting as a defect in this package rather than '
+            .'a mistake in your configuration.',
             $message,
         ));
 
@@ -752,6 +909,29 @@ final class CheckCommand extends Command
         $value = $config->get(self::CONFIG_KEY.'.'.$key);
 
         return is_string($value) ? $value : '';
+    }
+
+    /**
+     * A package configuration value as the integer the client was handed.
+     *
+     * **This must read the key exactly as the service provider reads it**, 0
+     * for anything that is not an integer included. The provider builds the
+     * client with what this returns, so `attemptBudgetRefused()` can only
+     * recognise the client's refusal by rebuilding the message from the same
+     * number; the two drifting apart would send every attempt-budget mistake
+     * down the generic branch, quietly, with the run still exiting 1 and still
+     * printing the client's words. The suite pins both halves — an out-of-range
+     * budget and a non-integer one each assert the named message — so the drift
+     * is a red test rather than a lost sentence.
+     *
+     * The configured text is never echoed back. What decides the refusal is the
+     * value that reached the client.
+     */
+    private function configInt(Repository $config, string $key): int
+    {
+        $value = $config->get(self::CONFIG_KEY.'.'.$key);
+
+        return is_int($value) ? $value : 0;
     }
 
     /**

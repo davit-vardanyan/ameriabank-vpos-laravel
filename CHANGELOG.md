@@ -36,13 +36,23 @@ and this project adheres to
   core client's `VposExceptionInterface` so one catch still covers both
   packages. Its constructor is private and every message it can emit lives in a
   named factory: an unrecognised `environment` value, a blank `back_url`, a
-  `back_url` naming a route that does not exist, and a `VposCallback` resolved
-  outside a request that carries one.
+  `back_url` naming a route that does not exist, a `back_url` naming a route that
+  *is* registered but declares required parameters, and a `VposCallback` resolved
+  outside a request that carries one. The two route mistakes take two factories
+  and are never conflated: reporting a registered route as "neither an absolute
+  URL nor the name of a registered route" would be false, and would send the
+  reader hunting for a typo in a spelling that is correct.
 - `back_url` resolution accepting either an absolute `http`/`https` URL or the
   name of a route, resolved when the value is needed rather than while providers
-  register. A blank value and an unresolvable route name both throw, and the
-  second names the value — it is never allowed to fall through to an empty
-  `BackURL`, which the gateway accepts and then sends the customer nowhere.
+  register. A blank value, a route name this application has not registered, and
+  a route name that is registered but cannot be built without parameters all
+  throw, and the two naming a route print it — a route name and a typo of one are
+  indistinguishable to look at. The value is never allowed to fall through to an
+  empty `BackURL`, which the gateway accepts and then sends the customer nowhere.
+  A parameterised route is reported as the configuration mistake it is rather than
+  as an unclassified failure: the `BackURL` is where the gateway returns the
+  customer, so it has to resolve on its own, and nothing here can supply a route
+  parameter.
 - `php artisan vpos:check`, which reports the resolved configuration and makes
   **one real HTTP request** to the gateway — a single `GetPaymentId` call. It
   exits 0 only when the credentials are proven valid, 1 only when they are
@@ -53,8 +63,14 @@ and this project adheres to
   unreachable gateway, a reply the client cannot read and a blind success code
   are all 2. A caveat in the output is not a result a pipeline can read; the exit
   code is. An out-of-range `max_attempts` is exit 1, named as the configuration
-  mistake it is, and no exception escapes the command as a stack trace — one that
-  did would exit 1 and so publish a rejection the gateway never gave. The
+  mistake it is; **any other refusal the client raises is also exit 1 but names no
+  key**, because the command cannot tell what was refused, which setting it came
+  from, or whether it came from a setting at all — it prints the client's own
+  words and says so, rather than guessing at a key the merchant may never have
+  set. No exception escapes the command as a stack trace — one that did would exit
+  1 and so publish a rejection the gateway never gave. Every inconclusive run made
+  without `--order-id` also names that option, since it is the only thing that can
+  turn an inconclusive result into an answer. The
   password is never read into a message, the ClientID and username are truncated
   to four characters, and the `PaymentId` the gateway returns is never printed.
 - The probe operation is **`GetPaymentId`**. The decisive reason is not

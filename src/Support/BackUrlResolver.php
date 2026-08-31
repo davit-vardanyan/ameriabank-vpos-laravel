@@ -9,6 +9,7 @@ use const PHP_URL_SCHEME;
 use DavitVardanyan\AmeriabankVpos\Laravel\Exception\ConfigurationException;
 use Illuminate\Contracts\Config\Repository;
 use Illuminate\Contracts\Routing\UrlGenerator;
+use Illuminate\Routing\Exceptions\UrlGenerationException;
 use InvalidArgumentException;
 
 use function is_string;
@@ -33,11 +34,13 @@ use function trim;
  *
  * ## It never returns an empty BackURL
  *
- * That is the whole point of the two refusals below. The gateway accepts an
+ * That is the whole point of the three refusals below. The gateway accepts an
  * empty BackURL and then sends the paying customer nowhere, which is a fault
- * discovered by a customer rather than by a deployment. A blank value and an
- * unresolvable route name both throw, and the second one names the value,
- * because a route name and a typo are indistinguishable to look at.
+ * discovered by a customer rather than by a deployment. A blank value, a route
+ * name this application has not registered, and a route name that is
+ * registered but cannot be built without parameters all throw, and the two
+ * that name a route name print it, because a route name and a typo of one are
+ * indistinguishable to look at.
  *
  * @internal
  */
@@ -65,22 +68,24 @@ final readonly class BackUrlResolver
      * more than silently accepting a spelling nothing else in the application
      * uses.
      *
-     * **One route-name mistake is not converted, and is documented rather than
-     * mistranslated.** An unregistered route name arrives as an
-     * `InvalidArgumentException` and is caught below. A route name that *is*
-     * registered but declares required parameters does not: the URL generator
-     * raises `UrlGenerationException`, which extends `Exception` directly. It
-     * therefore leaves this method as the framework's own exception. Routing it
-     * into the factory below would print that the value is "neither an absolute
-     * URL nor the name of a registered route", which is false — it is the name
-     * of a registered route — and would send the reader looking for a typo that
-     * is not there. `back_url` receives a plain redirect target with no
-     * parameters this package can supply, so the honest report is a distinct
-     * one naming that; it needs a factory this class may not add, and until
-     * that exists the framework's exception, which names the route and the
-     * missing parameter, is more informative than a wrong sentence.
+     * **Two route-name mistakes are converted, and they are converted
+     * separately.** An unregistered route name arrives as an
+     * `InvalidArgumentException` — Symfony's `RouteNotFoundException`. A route
+     * name that *is* registered but declares required parameters arrives as
+     * `UrlGenerationException`, which extends `Exception` directly and so is
+     * not an `InvalidArgumentException` at all; catching one has never caught
+     * the other, and widening a single clause could not have. They therefore
+     * take two clauses and two factories.
      *
-     * @throws ConfigurationException when the value is blank, or names a route this application has not registered
+     * They are not merged, because the messages are not interchangeable.
+     * Reporting a parameterised route as "neither an absolute URL nor the name
+     * of a registered route" would be false — it is the name of a registered
+     * route — and would send the reader looking for a typo that is not there.
+     * `back_url` is handed to the gateway as a plain redirect target with no
+     * parameters this package can supply, so that case is reported as what it
+     * is: the wrong route rather than a misspelt one.
+     *
+     * @throws ConfigurationException when the value is blank, names a route this application has not registered, or names one that cannot be built without parameters
      */
     public function resolve(): string
     {
@@ -99,6 +104,15 @@ final readonly class BackUrlResolver
             return $this->url->route($value);
         } catch (InvalidArgumentException $failure) {
             throw ConfigurationException::unresolvableBackUrlRoute($value, $failure);
+            // Static analysis reads this clause as dead, and it is wrong for a reason worth recording:
+            // Illuminate\Contracts\Routing\UrlGenerator::route() documents `@throws \InvalidArgumentException`
+            // and nothing else, while the generator behind that contract raises UrlGenerationException. The
+            // suppression is not a standing exemption — an unmatched ignore is itself a non-ignorable error,
+            // so the day the contract declares this exception, this line fails and has to be deleted. The
+            // package's own suite holds the other half, catching this exception as the chained cause below.
+            // @phpstan-ignore catch.neverThrown
+        } catch (UrlGenerationException $failure) {
+            throw ConfigurationException::parameterisedBackUrlRoute($value, $failure);
         }
     }
 

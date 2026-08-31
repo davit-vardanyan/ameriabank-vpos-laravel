@@ -292,17 +292,54 @@ function checkCommandExceptionExpectations(): array
 
         /*
          * Reachable from exactly one configuration key, which is why the
-         * command's message names that key. The attempt budget the fixture
-         * configures is 3, and the message reports what reached the client
-         * rather than what the exception was built with.
+         * command's message names that key.
+         *
+         * The refusal is built with the budget the fixture configures, because
+         * that is how it arises: the provider hands the client the configured
+         * number and the client refuses that number. The command recognises it
+         * by rebuilding the message from the same source, so a refusal of some
+         * other value would take the generic branch instead — which is the
+         * subject of its own test below, not of this row.
          */
         ValidationException::class => [
-            'factory' => static fn (): Throwable => ValidationException::maxAttemptsOutOfRange(9),
+            'factory' => static fn (): Throwable => ValidationException::maxAttemptsOutOfRange(
+                configuredAttemptBudget(),
+            ),
             'exit' => 1,
-            'says' => 'ameriabank-vpos.max_attempts (AMERIABANK_VPOS_MAX_ATTEMPTS) reached the client as 3, and '
-                .'the client refused it. '.ValidationException::maxAttemptsOutOfRange(9)->getMessage(),
+            'says' => sprintf(
+                'ameriabank-vpos.max_attempts (AMERIABANK_VPOS_MAX_ATTEMPTS) reached the client as %d, and the '
+                .'client refused it. %s',
+                configuredAttemptBudget(),
+                ValidationException::maxAttemptsOutOfRange(configuredAttemptBudget())->getMessage(),
+            ),
         ],
     ];
+}
+
+/**
+ * The attempt budget the fixture configured, read back rather than restated.
+ *
+ * `CheckCommand::attemptBudgetRefused()` recognises the attempt-budget refusal
+ * by rebuilding `ValidationException::maxAttemptsOutOfRange()` from the value
+ * this key holds. A test that wrote the number down instead would still pass if
+ * the command started comparing against something else that happened to equal
+ * it, and would go red for the wrong reason if the fixture changed.
+ *
+ * A non-integer here is a refusal rather than a silent 0: it would mean the
+ * fixture and this guard disagree about what the command reads.
+ */
+function configuredAttemptBudget(): int
+{
+    $configured = config('ameriabank-vpos.max_attempts');
+
+    if (! is_int($configured)) {
+        throw new RuntimeException(
+            'The fixture configured no integer ameriabank-vpos.max_attempts, so this guard cannot rebuild the '
+            .'refusal the client would have raised and would be asserting against a number it invented.',
+        );
+    }
+
+    return $configured;
 }
 
 /**
@@ -362,15 +399,23 @@ function coreValidationExceptionFactories(): array
 /**
  * Which of those factories a `vpos:check` run can actually provoke.
  *
- * `CheckCommand::attemptBudgetRefused()` prints one message for every
- * `ValidationException` that reaches it, and that message names
- * `ameriabank-vpos.max_attempts` and `AMERIABANK_VPOS_MAX_ATTEMPTS`. It is
- * correct only while the attempt budget is the one configured value on this
- * exchange the client range-checks — an inference about a separate package on
- * its own release cycle, held by nothing except somebody having read its call
- * sites once. This table is that reading, written down against a list derived
- * from the class, so the reading is dated and a new factory cannot arrive
- * unnoticed.
+ * **This table no longer holds the command's correctness up.**
+ * `CheckCommand::attemptBudgetRefused()` used to print one message naming
+ * `ameriabank-vpos.max_attempts` and `AMERIABANK_VPOS_MAX_ATTEMPTS` for every
+ * `ValidationException` reaching it, which was correct only while the attempt
+ * budget was the one configured value on this exchange the client
+ * range-checks — an inference about a separately versioned package, held by
+ * nothing except somebody having read its call sites once. The command now
+ * branches instead: it rebuilds `maxAttemptsOutOfRange()` from the configured
+ * value and gives anything that does not match a generic refusal naming no key
+ * at all. A factory that becomes reachable upstream therefore arrives as an
+ * honest generic message rather than as a wrong one.
+ *
+ * What the table is now is the dated reading itself, kept because the branch
+ * makes the *wrong* answer impossible and not the *vague* one: a factory that
+ * really does become reachable deserves a named message of its own, and
+ * recording the reading against a list derived from the class is what makes
+ * that arrival visible instead of silent.
  *
  * **What it does and does not catch.** A factory added upstream fails the guard
  * by name, because the derived list grows and this table does not. A factory
@@ -491,8 +536,11 @@ it('classifies every client exception that can reach it, and lets none escape', 
  * `HttpTransport::dispatch()` wraps only the three PSR-18 interfaces, so a plain
  * RuntimeException travels the same route the injected client exceptions travel
  * and arrives unwrapped. A `back_url` naming a route with required parameters
- * reaches it from the other direction, through the framework's own
- * UrlGenerationException.
+ * used to reach it from the other direction, through the framework's own
+ * UrlGenerationException; BackUrlResolver now converts that into a named
+ * configuration failure, which is why this clause is exercised through the
+ * PSR-18 seam alone. Closing one route into a clause of last resort is not a
+ * reason to remove it — it is what the clause is for.
  *
  * Two properties are asserted, and the second is the one that is easy to lose.
  *
@@ -534,27 +582,26 @@ it('classifies a throwable no clause names, without repeating what it said', fun
 });
 
 /*
- * The inventory behind the one message `vpos:check` gives every client
- * validation refusal. See validationFactoryReachability() for what these two
- * guards do and do not catch.
+ * The inventory behind the one validation refusal `vpos:check` names. See
+ * validationFactoryReachability() for what these two guards do and do not
+ * catch.
  */
 it('has a recorded reachability verdict for every validation refusal the client can raise', function (string $factory): void {
     $reachability = validationFactoryReachability();
 
     expect(array_key_exists($factory, $reachability))->toBeTrue(sprintf(
-        'ValidationException::%s() is a factory this repository has never assessed. vpos:check reports every '
-        .'ValidationException as a problem with ameriabank-vpos.max_attempts, which is true only while the '
-        .'attempt budget is the only one of these a GetPaymentId exchange can provoke. Decide whether %s() can '
-        .'reach that exchange and record it. If it can, the command must stop assuming: branch on the '
-        .'exception, comparing it against ValidationException::maxAttemptsOutOfRange() built with the '
-        .'configured value rather than against a message literal, and give anything unmatched a generic '
-        .'refusal that still exits 1 and still prints the client\'s own words.',
+        'ValidationException::%s() is a factory this repository has never assessed. vpos:check names '
+        .'ameriabank-vpos.max_attempts for exactly one of these — the attempt budget, recognised by rebuilding '
+        .'ValidationException::maxAttemptsOutOfRange() from the configured value — and gives every other one a '
+        .'generic refusal that names no key. So %s() arriving unassessed produces a vague message rather than a '
+        .'wrong one. Decide whether it can reach a GetPaymentId exchange and record it; if it can, it has earned '
+        .'a named message of its own rather than the generic one.',
         $factory,
         $factory,
     ));
 })->with('core validation factories');
 
-it('keeps the attempt budget the only validation refusal the command may assume it received', function (): void {
+it('keeps the attempt budget the only validation refusal the command names a key for', function (): void {
     $reachable = array_keys(array_filter(
         validationFactoryReachability(),
         static fn (array $verdict): bool => $verdict['reaches'],
@@ -562,11 +609,90 @@ it('keeps the attempt budget the only validation refusal the command may assume 
 
     expect($reachable)->toBe(['maxAttemptsOutOfRange'], sprintf(
         'More than one ValidationException factory is now recorded as reachable on a GetPaymentId exchange (%s), '
-        .'so CheckCommand::attemptBudgetRefused() is naming ameriabank-vpos.max_attempts for refusals that have '
-        .'nothing to do with it — and the first sentence is the one an operator acts on. Branch on the '
-        .'exception: compare it against ValidationException::maxAttemptsOutOfRange() built with the configured '
-        .'value, and give anything unmatched a generic "the client refused a configured value" message that '
-        .'still exits 1 and still prints the client\'s own words.',
+        .'and CheckCommand names a configuration key for only the attempt budget. The others will fall to the '
+        .'generic branch, which is honest but says nothing an operator can act on. Give the newly reachable one '
+        .'its own named branch, recognised the same way — from the client\'s own factory built with the '
+        .'configured value, never from a message literal.',
         implode(', ', $reachable),
     ));
+});
+
+/*
+ * The generic branch: a validation refusal this command may not name a key for.
+ *
+ * Two ways to arrive at it, and both are asserted, because they fail
+ * differently. The first is a refusal from another factory entirely — the shape
+ * a future upstream range check would take. The second is the attempt-budget
+ * factory carrying a value this configuration never asked for, which is what
+ * pins the comparison to `configInt()`'s reading rather than to the factory in
+ * general; a command that recognised "any maxAttemptsOutOfRange" would pass the
+ * first of these and fail the second.
+ *
+ * Both are injected through the PSR-18 seam rather than provoked from
+ * configuration, because configuration cannot produce them: the provider hands
+ * the client the configured budget, so the only refusal a real run can raise is
+ * the one built from that number. That refusal is exercised on its own path in
+ * CheckCommandTest.
+ *
+ * The key and the environment variable are asserted absent whole. Naming them
+ * for a refusal that has nothing to do with them is the defect these tests
+ * exist for, and it is the first sentence — the one an operator acts on.
+ */
+it('gives a validation refusal from another factory a generic message that names no configuration key', function (): void {
+    vposConfig();
+
+    $refusal = ValidationException::timeoutOutOfRange(1201);
+
+    expect($refusal->getMessage())->not->toBe(
+        ValidationException::maxAttemptsOutOfRange(configuredAttemptBudget())->getMessage(),
+        'This fixture is only a test of the generic branch while its message differs from the attempt-budget '
+        .'refusal this configuration would have produced.',
+    );
+
+    app()->instance(ClientInterface::class, clientRaising($refusal));
+
+    $exit = Artisan::call('vpos:check');
+    $output = Artisan::output();
+
+    expect($exit)->toBe(1, 'A refusal the operator has an account of and can act on exits 1 alongside the named '
+        .'one, whether or not this command can say what was refused or where it came from.')
+        ->and($output)->toContain('The Ameriabank vPOS configuration is not usable. The client raised a '
+            .'validation refusal, and this command cannot tell what it refused, which setting the refused input '
+            .'came from, or whether it came from a setting at all — the client\'s own words are the whole of '
+            .'what is known here. '.$refusal->getMessage().' Check the ameriabank-vpos configuration against '
+            .'that message; if nothing there matches, the refusal is not about a value you set, and this output '
+            .'is worth reporting as a defect in this package rather than a mistake in your configuration.')
+        ->and($output)->not->toContain('max_attempts')
+        ->and($output)->not->toContain('AMERIABANK_VPOS_MAX_ATTEMPTS');
+
+    /*
+     * The generic refusal carries no blind pointer, and this run is blind:
+     * Artisan::call() above is given no --order-id.
+     *
+     * `CheckCommand::pointBlindRunAtOrderId()`'s docblock excludes the
+     * configuration refusals, and this is the half of that exclusion
+     * CheckCommandTest cannot pin. The generic branch is unreachable from
+     * configuration — the provider hands the client the configured budget, so
+     * a real run can only raise the refusal built from that number — which
+     * makes this seam the only blind run that enters it.
+     */
+    expect($output)->not->toContain(blindPointer());
+});
+
+it('gives an attempt-budget refusal of a value this configuration never asked for the generic message', function (): void {
+    vposConfig();
+
+    $refusal = ValidationException::maxAttemptsOutOfRange(configuredAttemptBudget() + 1);
+
+    app()->instance(ClientInterface::class, clientRaising($refusal));
+
+    $exit = Artisan::call('vpos:check');
+    $output = Artisan::output();
+
+    expect($exit)->toBe(1)
+        ->and($output)->toContain('The client raised a validation refusal, and this command cannot tell what it '
+            .'refused, which setting the refused input came from, or whether it came from a setting at all')
+        ->and($output)->toContain($refusal->getMessage())
+        ->and($output)->not->toContain('max_attempts')
+        ->and($output)->not->toContain('AMERIABANK_VPOS_MAX_ATTEMPTS');
 });

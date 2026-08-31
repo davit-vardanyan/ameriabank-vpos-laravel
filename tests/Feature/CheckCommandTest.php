@@ -2,11 +2,17 @@
 
 declare(strict_types=1);
 
+use DavitVardanyan\AmeriabankVpos\Exception\ValidationException;
+use DavitVardanyan\AmeriabankVpos\Laravel\Commands\CheckCommand;
+use DavitVardanyan\AmeriabankVpos\Laravel\Exception\ConfigurationException;
 use DavitVardanyan\AmeriabankVpos\Laravel\Tests\Support\StubClientException;
 use DavitVardanyan\AmeriabankVpos\Laravel\Tests\Support\StubHttpClient;
+use Illuminate\Routing\Exceptions\UrlGenerationException;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Route;
 use Psr\Http\Client\ClientInterface;
+use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
 
 /**
  * The standing caveat, written out here rather than read from the command.
@@ -115,6 +121,146 @@ dataset('both modes', [
     'blind' => [null, SENTINEL_ORDER_ID],
     '--order-id' => [(string) MERCHANT_ORDER_ID, MERCHANT_ORDER_ID],
 ]);
+
+/**
+ * The five branches that can only report an inconclusive outcome, and the
+ * sentence each of them opens with.
+ *
+ * Keyed by the private method that produces the row, so a case name in the
+ * output names the branch under test. The value is enough of the branch's own
+ * message to tell it apart from the other four; the whole message is pinned
+ * elsewhere in this file, and repeating it here would put the same literal in
+ * two places and make a wording change red twice for one reason.
+ *
+ * `blindSuccess()` and `unusableOrderId()` are the two exit-2 rows that are not
+ * here, and both are deliberate. `blindSuccess()` can only ever happen in the
+ * blind mode, so a mode-dependent clause would be an unconditional one wearing
+ * a disguise, and it names the option in its own message already.
+ * `unusableOrderId()` returns before a mode is chosen at all — there is no
+ * blind run for it to point out — and it, too, names the option itself.
+ *
+ * @return array<string, string>
+ */
+function inconclusiveBranches(): array
+{
+    return [
+        'apiAnswer' => 'Inconclusive. GetPaymentId answered with response code 07',
+        'faulted' => 'Inconclusive. The gateway answered with a fault envelope rather than a response code',
+        'unexpected' => 'Inconclusive. The run failed with an unexpected RuntimeException',
+        'unreachable' => 'Inconclusive. Could not reach the gateway, so nothing was learned about the credentials.',
+        'unreadable' => 'Inconclusive. The exchange did not produce a reply this command could read',
+    ];
+}
+
+/**
+ * A fresh PSR-18 client that drives `vpos:check` into one named branch.
+ *
+ * Built per call rather than held in the dataset, because StubHttpClient
+ * scripts a single exchange and refuses a second: a client shared between the
+ * blind case and the --order-id case would make the second run fail for a
+ * reason that has nothing to do with what is being asserted.
+ *
+ * The default arm refuses rather than falling back to some other client. A
+ * branch named in the table with no way to provoke it would otherwise be
+ * asserted against a run that never entered it, which passes for the wrong
+ * reason; the refusal names the branch instead.
+ */
+function inconclusiveBranchClient(string $branch): ClientInterface
+{
+    return match ($branch) {
+        'apiAnswer' => StubHttpClient::answering(200, '{"ResponseCode":"07","ResponseMessage":"Payment amount exceeds"}'),
+        'faulted' => StubHttpClient::answering(500, '{"Message":"An error has occurred."}'),
+        'unexpected' => clientRaisingUnclassifiedFailure(),
+        'unreachable' => StubHttpClient::failingWith(new StubClientException('the socket timed out')),
+        'unreadable' => StubHttpClient::answering(200, '{"ResponseCode": UNPARSEABLE-BODY-MUST-NOT-BE-PRINTED}'),
+        default => throw new RuntimeException(sprintf(
+            'inconclusiveBranches() names the "%s" branch and nothing here can provoke it, so the pointer would '
+            .'have been asserted against a run that never entered it.',
+            $branch,
+        )),
+    };
+}
+
+/**
+ * A PSR-18 client raising something no clause in `handle()` names.
+ *
+ * `HttpTransport::dispatch()` wraps only the three PSR-18 interfaces, so a
+ * plain RuntimeException travels the whole way up unwrapped and arrives at the
+ * terminal `catch (Throwable)`. That is the one route left into it, and it is
+ * the only way to reach `unexpected()` from a test.
+ */
+function clientRaisingUnclassifiedFailure(): ClientInterface
+{
+    return new readonly class implements ClientInterface
+    {
+        public function sendRequest(RequestInterface $request): ResponseInterface
+        {
+            throw new RuntimeException('the stand-in for a component this command does not classify');
+        }
+    };
+}
+
+/**
+ * Every branch `handle()` hands the run's mode to, derived from the class.
+ *
+ * The table above is a list of five method names, and a list of names goes
+ * stale the moment a sixth branch is written. This reads the signatures
+ * instead: a private handler that returns an exit code and takes a boolean is
+ * one `handle()` has told whether the run was blind, and there is nothing else
+ * in this class shaped like that. Declared methods only, so nothing inherited
+ * from Symfony's or Laravel's Command can wander in.
+ *
+ * It is a proxy rather than a proof — it cannot see what a branch does with the
+ * flag — and the two tests below are what establish that. What it catches is
+ * the failure the table cannot: a sixth branch given the mode and never
+ * asserted, which would leave this file passing while the new row printed
+ * whatever it liked.
+ *
+ * @return list<string>
+ */
+function checkCommandBranchesToldTheMode(): array
+{
+    $subjects = [];
+
+    foreach ((new ReflectionClass(CheckCommand::class))->getMethods() as $method) {
+        $returnType = $method->getReturnType();
+
+        if ($method->getDeclaringClass()->getName() !== CheckCommand::class) {
+            continue;
+        }
+
+        if (! $returnType instanceof ReflectionNamedType || $returnType->getName() !== 'int') {
+            continue;
+        }
+
+        foreach ($method->getParameters() as $parameter) {
+            $parameterType = $parameter->getType();
+
+            if ($parameterType instanceof ReflectionNamedType && $parameterType->getName() === 'bool') {
+                $subjects[] = $method->getName();
+
+                break;
+            }
+        }
+    }
+
+    sort($subjects);
+
+    return $subjects;
+}
+
+/**
+ * One case per inconclusive branch, named after the branch.
+ */
+dataset('inconclusive branches', function (): array {
+    $cases = [];
+
+    foreach (array_keys(inconclusiveBranches()) as $branch) {
+        $cases[$branch] = [$branch];
+    }
+
+    return $cases;
+});
 
 /**
  * The artisan parameters for a mode, from the option value that names it.
@@ -337,6 +483,18 @@ it('exits 2 rather than 0 when a blind probe is answered with a success code', f
             .'in either direction. Re-run with --order-id set to an order you registered.')
         ->and($result['output'])->not->toContain('The credentials are valid.');
 
+    /*
+     * The sixth inconclusive row, and the one the blind pointer is kept off.
+     *
+     * `pointBlindRunAtOrderId()`'s docblock excludes it and nothing observed
+     * the exclusion. It is reachable in no other mode, so a clause conditional
+     * on the mode would be an unconditional one wearing a disguise, and the
+     * message asserted above already ends by naming the option. This pins that
+     * reasoning against the one mutation the tooling cannot make: mutants
+     * remove and invert calls, they never add one.
+     */
+    expect($result['output'])->not->toContain(blindPointer());
+
     expectNoPaymentIdLeak($result['output']);
     expectNoCredentialLeak($result['output']);
 });
@@ -437,6 +595,24 @@ it('exits 1 when the gateway answers response code 20 as an integer', function (
         ->and($result['output'])
         ->toContain('The gateway rejected these credentials with response code 20: Incorrect Username and Password'.REJECTION_ADVICE)
         ->and($result['output'])->not->toContain('Inconclusive.');
+
+    /*
+     * A rejection carries no blind pointer, and the blind case of this dataset
+     * is where that can go wrong.
+     *
+     * `pointBlindRunAtOrderId()`'s docblock excludes the rejection because a
+     * rejection is an answer and the mode does not change it. The failure
+     * direction is the bad one: the pointer says no answer this run could have
+     * received would have proved the credentials valid, and appending it to
+     * the one row where the gateway did give a verdict about them contradicts
+     * the line above it.
+     *
+     * Integer 20 arrives as an AuthenticationException and is classified in
+     * `handle()` itself, so what this pins is the call being hoisted into that
+     * catch clause or after the try/catch. The string form reaches the same
+     * branch by another route and is pinned separately below.
+     */
+    expect($result['output'])->not->toContain(blindPointer());
 })->with('both modes');
 
 /*
@@ -458,6 +634,19 @@ it('exits 1 when the gateway answers response code 20 as a string', function (?s
         ->and($result['output'])
         ->toContain('The gateway rejected these credentials with response code 20: Incorrect Username and Password'.REJECTION_ADVICE)
         ->and($result['output'])->not->toContain('Inconclusive.');
+
+    /*
+     * The same exclusion, on the other route into the same branch.
+     *
+     * The string form is not classified in `handle()`. It arrives as a plain
+     * ApiException, so it reaches `apiAnswer()` — which *is* handed the mode —
+     * and returns through the rejection test before the pointer is printed.
+     * That makes this a different subject from the assertion above: it pins the
+     * call being lifted over `apiAnswer()`'s rejection test, which would put
+     * the pointer on a rejection with every other assertion in this file still
+     * green.
+     */
+    expect($result['output'])->not->toContain(blindPointer());
 })->with('both modes');
 
 it('says a rejection carried no message when the gateway sent none', function (): void {
@@ -628,6 +817,62 @@ it('exits 2 when a success code arrives in a shape this client cannot hydrate', 
 
 /*
  * ---------------------------------------------------------------------------
+ * The blind pointer: an inconclusive run in the mode that could not have
+ * proved anything is told which mode could have.
+ *
+ * Each of these branches already ends with a next step for the condition it
+ * reports, and each of those is asserted whole elsewhere in this file. The
+ * pointer is additional and never a replacement, so both assertions are made on
+ * the same run: the branch's own sentence and the clause after it.
+ *
+ * The mode note carrying the same advice is printed before the send, above the
+ * six configuration lines and the "Sending one GetPaymentId request" line. The
+ * package's own argument for repeating a premise in the verdict — proven()'s
+ * docblock, "rather than leaving it four lines up the scrollback" — is stronger
+ * here than in the row it was written for.
+ * ---------------------------------------------------------------------------
+ */
+
+it('points a blind run at --order-id from every inconclusive branch', function (string $branch): void {
+    $result = runCheck(inconclusiveBranchClient($branch));
+
+    expect($result['exit'])->toBe(2)
+        ->and($result['output'])->toContain(inconclusiveBranches()[$branch])
+        ->and($result['output'])->toContain(blindPointer());
+})->with('inconclusive branches');
+
+it('omits the --order-id pointer from every inconclusive branch when --order-id was given', function (string $branch): void {
+    $result = runCheck(inconclusiveBranchClient($branch), checkParameters((string) MERCHANT_ORDER_ID));
+
+    expect($result['exit'])->toBe(2)
+        ->and($result['output'])->toContain(inconclusiveBranches()[$branch])
+        ->and($result['output'])->not->toContain(blindPointer());
+})->with('inconclusive branches');
+
+/*
+ * The two lists above and below the pointer tests must be the same list.
+ *
+ * inconclusiveBranches() is written down; the branches the command actually
+ * hands the mode to are read off its signatures. A sixth branch added and
+ * given the flag would otherwise print an unasserted clause, or none, with
+ * every test in this file still green.
+ */
+it('asserts the pointer on every branch the command hands the mode to', function (): void {
+    $asserted = array_keys(inconclusiveBranches());
+    sort($asserted);
+
+    expect(checkCommandBranchesToldTheMode())->toBe($asserted, sprintf(
+        'CheckCommand hands the run\'s mode to [%s], and this file asserts the blind pointer on [%s]. A branch '
+        .'told whether the run was blind and never asserted either prints a clause nobody has read or silently '
+        .'stops printing it. Add it to inconclusiveBranches() with a way to provoke it in '
+        .'inconclusiveBranchClient(), or take the flag off it.',
+        implode(', ', checkCommandBranchesToldTheMode()),
+        implode(', ', $asserted),
+    ));
+});
+
+/*
+ * ---------------------------------------------------------------------------
  * The configuration rows: exit 1, because a configuration this package refuses
  * is a fact about the merchant's configuration and not a guess about it.
  * ---------------------------------------------------------------------------
@@ -727,17 +972,119 @@ it('refuses an unresolvable back_url before it sends anything', function (): voi
             .'"checkout.vpos.bakc", which is neither an absolute http or https URL nor the name of a registered '
             .'route. Name a route, or configure a full URL.');
 
+    /*
+     * A configuration refusal carries no blind pointer, and this run is blind.
+     *
+     * `pointBlindRunAtOrderId()`'s docblock excludes the configuration
+     * refusals for the same reason it excludes the rejection: each is an
+     * answer, and the mode does not change it. Here it is more than that —
+     * nothing was sent, so there is no reply a second run in the other mode
+     * would have improved on, and the pointer would be advice to re-run a
+     * probe that never happened. This is the only observation of that
+     * exclusion on a run that actually took the blind path into
+     * `misconfigured()`.
+     */
+    expect($result['output'])->not->toContain(blindPointer());
+
     expectNoCredentialLeak($result['output']);
 });
 
 /*
- * The core's ValidationException. It reaches this command from exactly one
- * configuration key, so the command names that key and the environment variable
- * behind it rather than letting an InvalidArgumentException escape as an
- * unrendered stack trace.
+ * The other `back_url` mistake, and it is reported as its own mistake.
+ *
+ * A route name that is registered but declares a required parameter is not a
+ * route name that does not exist, and the command no longer collapses the two.
+ * BackUrlResolver converts UrlGenerationException — which extends Exception
+ * directly, so it was never an InvalidArgumentException and was never caught by
+ * the clause next to it — through a second named factory, and the result
+ * arrives at handle()'s ClientConfigurationException|ConfigurationException
+ * clause: exit 1, naming the field.
+ *
+ * **This test previously pinned exit 2.** It recorded the terminal
+ * catch (Throwable) outcome so that this move would read in a diff as a
+ * deliberate behaviour change rather than as a silent one. It is the one exit
+ * code task 003 moves, and this is where the move is written down.
+ *
+ * Exit 1 is the right code because the claim it makes here is the configuration
+ * one, not the credential one: `misconfigured()` is what returned it, and every
+ * other `back_url` refusal already exits 1 through the same handler.
+ *
+ * ## Three assertions carry the change, and each is derived rather than typed
+ *
+ * The message asserted is the factory's own, so a reworded message updates in
+ * one place and this test follows it. The route-not-found message is built from
+ * *its* factory and asserted absent, which is what pins that the two cases have
+ * two messages: routing the parameterised case back through
+ * unresolvableBackUrlRoute() turns that assertion red immediately, and no
+ * literal fragment of either message is hand-copied here to drift. And the
+ * framework class is asserted absent, because its appearance in the output is
+ * exactly what escaping to the terminal clause looks like.
+ *
+ * `Password: (set)` pins that the run reached the credential block before it
+ * failed; without it the test would still pass if the failure moved upstream.
+ * `BackURL: ` is asserted absent because the command must not print a BackURL
+ * it never obtained.
+ *
+ * The framework's own phrasing and the route's URI pattern are both asserted
+ * absent, and that is a decision rather than an accident: the factory composes
+ * its own sentence and chains the framework exception as the cause instead of
+ * quoting it. See ConfigurationException::parameterisedBackUrlRoute().
+ */
+it('names a back_url route that needs parameters as the configuration mistake it is, and sends nothing', function (): void {
+    Route::get('/checkout/{order}/vpos/back', static fn (): string => 'ok')->name('checkout.vpos.back');
+    vposConfig(['ameriabank-vpos.back_url' => 'checkout.vpos.back']);
+
+    $routeNotFound = ConfigurationException::unresolvableBackUrlRoute(
+        'checkout.vpos.back',
+        new RuntimeException('the other mistake, for contrast only'),
+    )->getMessage();
+
+    $stub = StubHttpClient::answering(200, SUCCESS_BODY);
+    $result = runCheck($stub);
+
+    expect($result['exit'])->toBe(1)
+        ->and($stub->requests())->toBe([])
+        ->and($result['output'])
+        ->toContain('Password: (set)')
+        ->and($result['output'])->not->toContain('BackURL: ')
+        ->and($result['output'])->not->toContain('Sending one GetPaymentId request')
+        ->and($result['output'])->toContain(sprintf(
+            'The Ameriabank vPOS configuration is not usable. %s',
+            ConfigurationException::parameterisedBackUrlRoute(
+                'checkout.vpos.back',
+                new RuntimeException('the cause, which is not printed'),
+            )->getMessage(),
+        ))
+        ->and($result['output'])->not->toContain($routeNotFound)
+        ->and($result['output'])->not->toContain(UrlGenerationException::class)
+        ->and($result['output'])->not->toContain('Missing required parameter')
+        ->and($result['output'])->not->toContain('{order}');
+
+    expectNoCredentialLeak($result['output']);
+});
+
+/*
+ * The core's ValidationException, arriving the one way a real run can produce
+ * it: the provider hands the client the configured attempt budget and the
+ * client refuses that number.
+ *
+ * This is the branch that names the key and the environment variable, and the
+ * command reaches it by rebuilding ValidationException::maxAttemptsOutOfRange()
+ * from the configured value and finding the two messages identical. So the
+ * expected string is built from the client's own factory here as well. A
+ * hand-copied one would keep passing if the command started comparing against a
+ * literal of its own that had drifted from the client's wording — the command
+ * would print its literal and the test would confirm its copy of it, with the
+ * client saying something else entirely.
+ *
+ * The refusal of a value this configuration did not ask for is the other side
+ * of that comparison, and it cannot be provoked from configuration at all: it
+ * is asserted through the PSR-18 seam in CheckCommandExceptionCoverageTest.
  */
 it('refuses an out-of-range max_attempts and names the configuration key', function (?string $orderIdOption, int $orderId): void {
-    vposConfig(['ameriabank-vpos.max_attempts' => 9]);
+    $configured = 9;
+
+    vposConfig(['ameriabank-vpos.max_attempts' => $configured]);
 
     $stub = StubHttpClient::answering(200, SUCCESS_BODY);
     $result = runCheck($stub, checkParameters($orderIdOption));
@@ -745,9 +1092,24 @@ it('refuses an out-of-range max_attempts and names the configuration key', funct
     expect($result['exit'])->toBe(1)
         ->and($stub->requests())->toBe([])
         ->and($result['output'])
-        ->toContain('The Ameriabank vPOS configuration is not usable. ameriabank-vpos.max_attempts '
-            .'(AMERIABANK_VPOS_MAX_ATTEMPTS) reached the client as 9, and the client refused it. '
-            .'The maximum attempt count must be between 1 and 5, got 9.');
+        ->toContain(sprintf(
+            'The Ameriabank vPOS configuration is not usable. ameriabank-vpos.max_attempts '
+            .'(AMERIABANK_VPOS_MAX_ATTEMPTS) reached the client as %d, and the client refused it. %s',
+            $configured,
+            ValidationException::maxAttemptsOutOfRange($configured)->getMessage(),
+        ));
+
+    /*
+     * The named refusal carries no blind pointer either, and the blind case of
+     * this dataset is the one that could carry it.
+     *
+     * The client refused a number this configuration handed it before anything
+     * reached the wire in this run, so the mode changed nothing about the
+     * outcome and re-running with --order-id would produce the identical
+     * refusal. The generic half of the same branch is pinned in
+     * CheckCommandExceptionCoverageTest, which is the only place it can be.
+     */
+    expect($result['output'])->not->toContain(blindPointer());
 
     expectNoCredentialLeak($result['output']);
 })->with('both modes');
@@ -756,8 +1118,16 @@ it('refuses an out-of-range max_attempts and names the configuration key', funct
  * A non-integer max_attempts reaches the client as 0, and 0 is what the message
  * must report: the configured text is not echoed back, because what decides the
  * refusal is the value the client was actually handed.
+ *
+ * It is also what pins the command's reading of the key to the provider's. The
+ * two compute the same 0 from the same non-integer, and the named branch is
+ * reached only because they agree; a command that read this key differently
+ * from the provider would rebuild the refusal from a different number, match
+ * nothing, and fall to the generic message this asserts against.
  */
 it('reports a non-integer max_attempts as the zero the client was handed', function (): void {
+    $handedToTheClient = 0;
+
     vposConfig(['ameriabank-vpos.max_attempts' => 'three']);
 
     $stub = StubHttpClient::answering(200, SUCCESS_BODY);
@@ -766,9 +1136,14 @@ it('reports a non-integer max_attempts as the zero the client was handed', funct
     expect($result['exit'])->toBe(1)
         ->and($stub->requests())->toBe([])
         ->and($result['output'])
-        ->toContain('ameriabank-vpos.max_attempts (AMERIABANK_VPOS_MAX_ATTEMPTS) reached the client as 0, and the '
-            .'client refused it. The maximum attempt count must be between 1 and 5, got 0.')
-        ->and($result['output'])->not->toContain('three');
+        ->toContain(sprintf(
+            'ameriabank-vpos.max_attempts (AMERIABANK_VPOS_MAX_ATTEMPTS) reached the client as %d, and the '
+            .'client refused it. %s',
+            $handedToTheClient,
+            ValidationException::maxAttemptsOutOfRange($handedToTheClient)->getMessage(),
+        ))
+        ->and($result['output'])->not->toContain('three')
+        ->and($result['output'])->not->toContain('The client raised a validation refusal');
 });
 
 /*
@@ -803,6 +1178,33 @@ it('refuses a non-integer --order-id, sends nothing, and exits 2', function (): 
      * every run" now means every run.
      */
     expect($result['output'])->toContain(NO_RELIABLE_CHECK);
+});
+
+/*
+ * The sixth exit-2 row, and the only one that must not carry the blind pointer.
+ *
+ * `pointBlindRunAtOrderId()`'s docblock makes this claim in words — "Not
+ * printed by unusableOrderId() either — that path returns before any mode is
+ * chosen and names the option itself" — and nothing observed it. The claim
+ * above pins that no *mode note* is printed; this pins the clause that hangs
+ * off the mode, which is a separate statement in a separate method and could
+ * start being printed here without that assertion moving.
+ *
+ * It matters in the direction the pointer is wrong. This path is reached only
+ * when `--order-id` was given, so a pointer printed here would tell an operator
+ * who has just typed `--order-id` to re-run with `--order-id`, in the one
+ * message whose whole job is to show them what they mistyped. The run is also
+ * not blind in the sense the clause means: nothing was sent, so no answer was
+ * received that a different mode would have improved on.
+ */
+it('adds no blind pointer to the unusable --order-id refusal, which returns before a mode is chosen', function (): void {
+    $stub = StubHttpClient::answering(200, SUCCESS_BODY);
+
+    $result = runCheck($stub, ['--order-id' => 'A-77']);
+
+    expect($result['exit'])->toBe(2)
+        ->and($stub->requests())->toBe([])
+        ->and($result['output'])->not->toContain(blindPointer());
 });
 
 /*

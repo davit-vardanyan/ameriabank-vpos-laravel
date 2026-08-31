@@ -131,6 +131,13 @@ useful thing the message can say. A blank `back_url` throws too. It is never
 allowed to fall through to an empty `BackURL`, because the gateway accepts an
 empty one and then sends the paying customer nowhere.
 
+A route name that *is* registered but whose route declares required parameters —
+`/checkout/{order}/vpos/back`, say — throws as well, with its own message rather
+than the one above: the name is not misspelt, the route is the wrong one to point
+at. Nothing supplies those parameters here, because the `BackURL` is the address
+the gateway returns the customer to and it has to resolve on its own. Register a
+route that takes none, or configure an absolute URL.
+
 The scheme test is case-sensitive on purpose. `HTTPS://…` is read as a route
 name and produces a message naming the value, which says more than quietly
 accepting a spelling nothing else in the application uses.
@@ -391,7 +398,10 @@ has never been observed under *either* credential state — there is nothing to
 compare the reply against.
 
 Use `--order-id` whenever you have an order number to hand. It is the only mode
-that can return a positive answer at all.
+that can return a positive answer at all, and every inconclusive row of a blind
+run says so on the line that reports it — the reminder is printed beside the
+verdict rather than only in the mode note above it, because that line is the one
+that gets read.
 
 ### What each answer establishes
 
@@ -408,6 +418,7 @@ that can return a positive answer at all.
 | either | a reply this client cannot read | nothing | 2 |
 | either | any other failure, named by its class | nothing; the run stopped before it could establish anything | 2 |
 | either | the configuration would not resolve, an out-of-range `max_attempts` included | the configuration is wrong, and which value | 1 |
+| either | the client refused something else | nothing about *what* was refused, or whether it was configured at all; the client's own refusal is printed, and no key is named or guessed | 1 |
 | neither | `--order-id` was given something that is not an integer | nothing; nothing was sent | 2 |
 
 **Exit 0 only when the credentials are proven valid. Exit 1 only when they are
