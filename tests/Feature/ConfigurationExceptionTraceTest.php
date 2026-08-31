@@ -74,8 +74,9 @@ use Illuminate\Support\Facades\Route;
  * exception a merchant would actually get rather than one this file built.
  *
  * One row per factory, not per throw site. Two throw sites may call one factory
- * — `notAString()` has one in the service provider and one in `vpos:check` —
- * and the parameter types they must satisfy are the factory's, which
+ * — `unknownEnvironment()` has one in the service provider and one in
+ * `vpos:check`, each raised from its own `Environment::tryFrom()` — and the
+ * parameter types they must satisfy are the factory's, which
  * `tests/Arch/ExceptionFactorySignatureTest.php` holds for every factory at
  * once. That is the structural half of this claim; this is the behavioural
  * half.

@@ -554,6 +554,53 @@ Where an example needs a ClientID, this project uses an all-zero GUID —
 cannot be a real credential; it is **not** a claim about the format the bank
 issues.
 
+### Stack traces, and what an error reporter can reach
+
+Logs, exception messages and bug reports are three places a credential must not
+appear. A stack trace is a fourth, and it does not behave like the other three,
+because it has two forms that disclose different amounts.
+
+**The string form is clean.** `getTraceAsString()` renders an object argument as
+`Object(Illuminate\Config\Repository)` — it names the class and never walks into
+it. That is the form Laravel's default log formatter writes to
+`storage/logs/laravel.log`, so a refusal that is merely logged carries no
+credential. Measured on PHP 8.3.28 and 8.5.7, under both
+`zend.exception_ignore_args` settings.
+
+**The array form is not.** `getTrace()` frame arguments are the live objects, so
+an error reporter that walks the trace itself and serialises what it finds there
+reads whatever those objects hold. Sentry and Flare can both be configured to do
+exactly that, and an error reporter is a realistic thing for a merchant taking
+payments to have.
+
+This package keeps the frames it declares clear of it. No method here that can
+raise a refusal takes the configuration repository — or the container, which
+reaches it in one hop — as an argument. The reader that resolves a key holds the
+repository on the instance and takes only the key, and `Exception::getTrace()`
+produces no `object` key at all, so the instance holding it is not in the trace
+either. Two constructors do accept the repository, and neither of them throws.
+
+**What no package can control is the frames the framework builds — and one of
+those is in this package's own traces.** The container hands itself to the
+closure a service provider registers, whatever that closure declares, so a
+refusal raised while one of the bindings above resolves carries a
+`AmeriabankVposServiceProvider::{closure}` frame with an
+`Illuminate\Foundation\Application` argument in it. That frame is the
+framework's rather than this package's, and no parameter list removes it. A
+container reaches the configuration repository, so a reporter walking a trace
+far enough and deep enough can still arrive at your credentials — through that
+frame, and from an exception raised anywhere in the application, not only from
+this package.
+
+Two settings close that, and neither belongs to this package:
+
+- `zend.exception_ignore_args`, which PHP's own `php.ini-production` turns
+  **on**, removes `args` from every frame and so closes it for every package at
+  once;
+- otherwise it is your reporter's own scrubbing configuration — Sentry's
+  `before_send` and `send_default_pii`, Flare's censoring options. Confirm the
+  result on a test event rather than assuming it.
+
 If a credential is ever exposed, rotate it with Ameriabank immediately. See
 [`SECURITY.md`](SECURITY.md) for how to report a vulnerability privately.
 

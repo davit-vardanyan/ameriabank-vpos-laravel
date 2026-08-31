@@ -55,9 +55,29 @@ final class ConfigurationException extends LogicException implements VposExcepti
     /**
      * Private, so the named factories below are the only way in.
      *
-     * The code is always 0, matching every exception the core package throws,
-     * so nothing downstream has to decide whether this package's codes mean
-     * anything. They do not.
+     * The code is always 0, so nothing downstream has to decide whether this
+     * package's codes mean anything. They do not.
+     *
+     * **The core package agrees, with one carve-out worth naming** for anyone
+     * writing a single catch block over both packages. Every class in the
+     * core's `Exception/` namespace passes 0 or passes no code at all, and
+     * those are the classes `VposExceptionInterface` marks. Its three
+     * `Http/Redacted*` stand-ins — `RedactedNetworkException`,
+     * `RedactedRequestException` and `RedactedClientException` — instead take
+     * an `int $code` and pass it straight to `RuntimeException`, fed from
+     * whatever code the consumer's own PSR-18 client set. `getCode()` is
+     * meaningful on those three and nowhere else across the two packages. They
+     * implement PSR-18's exception interfaces rather than
+     * `VposExceptionInterface`, so a catch on the marker interface does not
+     * see them at all.
+     *
+     * That paragraph is a claim about a package this one does not control, and
+     * nothing in this package's gate reads the core's method bodies, so it is
+     * written as what was measured rather than as a property. Measured against
+     * `davit-vardanyan/ameriabank-vpos-php` v1.0.1: `src/Exception/*` pass 0 or
+     * nothing, and `src/Http/RedactedNetworkException.php:59`,
+     * `RedactedRequestException.php:45` and `RedactedClientException.php:48`
+     * each read `parent::__construct($message, $code)`.
      */
     private function __construct(string $message, ?Throwable $previous = null)
     {
@@ -195,12 +215,20 @@ final class ConfigurationException extends LogicException implements VposExcepti
      * wrong.
      *
      * **Only the type is named, and the value never crosses into this class.**
-     * Every key that reaches here is read out of the package's own
-     * configuration namespace, and three of them hold credentials, so the
-     * value cannot be repeated, cannot be truncated, and cannot be described by
-     * anything derived from it. `get_debug_type()` names the type and nothing
-     * else — it returns `int`, `bool`, `array`, `float` or a class name, none
-     * of which is a function of the value.
+     * The value cannot be repeated, cannot be truncated, and cannot be
+     * described by anything derived from it. `get_debug_type()` names the type
+     * and nothing else — it returns `int`, `bool`, `array`, `float` or a class
+     * name, none of which is a function of the value.
+     *
+     * That treatment assumes the key may hold a credential, and today it does:
+     * the sole caller is `ConfigReader::string()`, which reads under this
+     * package's own configuration namespace, where three keys hold the
+     * ClientID, the username and the password. **The assumption is the reason
+     * for the treatment, not a property of this class.** A second caller
+     * reading some other namespace would make the assumption wrong and change
+     * nothing about what the parameters do, and nothing here would go red:
+     * this class cannot constrain where a key comes from, and the defence is
+     * in the signature rather than in the provenance.
      *
      * **The caller resolves the type; this factory is handed the name.** A
      * factory taking the value would keep it out of the message and put it into
@@ -243,10 +271,18 @@ final class ConfigurationException extends LogicException implements VposExcepti
      * accepted range.
      *
      * Checked on this side of the bridge rather than left to the client. The
-     * client refuses the same value — its transport raises a
-     * `ValidationException` from its constructor — but it refuses a *number*,
-     * having no idea where that number came from, so its message can name
-     * neither the configuration key nor the environment variable behind it.
+     * client refuses the same value, but it refuses a *number*, having no idea
+     * where that number came from, so its message can name neither the
+     * configuration key nor the environment variable behind it. Where the
+     * client refuses it is a fact about the core, and nothing in this package's
+     * gate reads the core's method bodies, so it is stated as the measurement
+     * it is: on the installed `^1.0.1`,
+     * `src/Http/HttpTransport.php:306-307` raises `ValidationException` from the
+     * transport's constructor. What this package *holds* is narrower and is
+     * held by `tests/Arch/AttemptBudgetBoundsTest.php`: the range accepted here
+     * is exactly `HttpTransport::MINIMUM_ATTEMPTS..MAXIMUM_ATTEMPTS`, read by
+     * reflection at test time. That the client enforces those constants is
+     * deliberately not asserted anywhere.
      * This value comes from `ameriabank-vpos.max_attempts` and from nowhere
      * else, so this package can say exactly what to change, and does.
      *
@@ -269,14 +305,30 @@ final class ConfigurationException extends LogicException implements VposExcepti
      * `notAString()` gives at greater length: a factory's own parameters become
      * frame 0's `args` in the trace the exception it builds carries, and that
      * trace is logged. `max_attempts` is not a credential, so this one is
-     * consistency rather than exposure — but a factory that accepts the value
-     * is where a credential gets routed next, and the type name is all this
-     * sentence ever needed.
+     * consistency rather than exposure — and the exposure is not hypothetical:
+     * `notAString(string $key, mixed $actual)` shipped in exactly this shape,
+     * kept the configured value out of its message, and put a password set to
+     * an array into `getTrace()[0]['args']` and from there verbatim into
+     * `storage/logs/laravel.log`. That is the demonstration this signature
+     * rests on, and `tests/Arch/ExceptionFactorySignatureTest.php` is what
+     * keeps the shape unrepresentable across every factory on this class.
      *
      * Which of the two faults occurred is therefore decided from the type name
      * rather than from the value: `get_debug_type()` returns `int` for exactly
      * the values `is_int()` accepts, so an `int` arriving here is one the
      * caller compared against the bounds and rejected.
+     *
+     * **That last sentence is about the caller, not about this class.** The
+     * only caller in `src/` is `AmeriabankVposServiceProvider::maxAttempts()`,
+     * which compares the value against the same two bounds it then passes in.
+     * `tests/Arch/AttemptBudgetBoundsTest.php` also calls it, to rebuild the
+     * expected message from the client's own constants; the bounds it hands
+     * over come from reflection and are compared against nothing, so it is
+     * already the second caller the next sentence describes — it asserts the
+     * sentence rather than relying on it. A second caller in `src/` handing
+     * over an unchecked `int` would make the sentence false, and nothing here
+     * would go red: this class cannot constrain a caller, and states the range
+     * branch's premise rather than guaranteeing it.
      *
      * @param  string  $type  The configured value's type, from `get_debug_type()` at the throw site. Never a value.
      * @param  int  $lowestBudget  The smallest accepted attempt count, from the caller that enforces it.
@@ -397,8 +449,26 @@ final class ConfigurationException extends LogicException implements VposExcepti
      * alone, and a reader who finds only this one will conclude the other is
      * unnecessary: it is not.
      *
-     * `previous` is dropped for the same reason the core drops it, and that it
-     * was dropped is recorded rather than silently lost.
+     * `previous` is dropped, and that it was dropped is recorded rather than
+     * silently lost — that is what the `chainDropped` key is.
+     *
+     * The reason is the opening paragraph's, and it is this class's own: a chain
+     * is an object this package did not build, reachable only through code it
+     * does not own, so listing it would put back exactly the unbounded state
+     * that naming the state explicitly removes. Only three factories take one —
+     * `unresolvableBackUrlRoute()`, `parameterisedBackUrlRoute()` and
+     * `callbackOutsideRequest()` — and their causes come from Laravel's URL
+     * generator and from the client, neither of which this package can bound.
+     *
+     * The core drops it too, and its reason is **not** borrowed, because it does
+     * not transfer. Measured on the installed `^1.0.1`,
+     * `src/Support/ExceptionState.php:49-52` drops `previous` because a transport
+     * failure's chain is a PSR-18 exception or a scrubbed stand-in for one, and
+     * both hand back the request they were sent, whose body is the merged
+     * credential payload. No chain of that shape reaches this class: none of the
+     * three factories above is on a transport path. Citing the core's reason
+     * here would be holding this package's decision up with an argument about
+     * somebody else's code that nothing in this gate reads.
      *
      * @return array<string, mixed>
      */
@@ -464,10 +534,16 @@ final class ConfigurationException extends LogicException implements VposExcepti
      *
      * A positive filter, not a blacklist. `args` is the key that carries a
      * payload today; `object` is not one `Exception::getTrace()` produces at all
-     * — only `debug_backtrace()` supplies it, and only when asked — so it is not
-     * named here as a thing being dropped. It does not need to be: a frame is a
-     * structure this package does not own, so an unknown key that survives is a
-     * leak, while one that is dropped is a slightly thinner diagnostic. Anything
+     * — measured on PHP 8.3.28 and on 8.5.7, from inside an instance method
+     * taking an object argument, under both `zend.exception_ignore_args`
+     * settings, with no frame carrying the key on any of the four runs. Only
+     * `debug_backtrace()` supplies it, and it supplies it **by default**:
+     * `DEBUG_BACKTRACE_PROVIDE_OBJECT` is the default `$options`, and the key
+     * is omitted only when a caller asks for that by passing `0` or
+     * `DEBUG_BACKTRACE_IGNORE_ARGS`. `object` is therefore not named here as a
+     * thing being dropped. It does not need to be: a frame is a structure this
+     * package does not own, so an unknown key that survives is a leak, while
+     * one that is dropped is a slightly thinner diagnostic. Anything
      * the engine adds later — an `object` key included, should one ever appear —
      * is therefore dropped by default rather than published by default.
      *

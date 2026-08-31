@@ -825,6 +825,15 @@ it('exits 2 when a success code arrives in a shape this client cannot hydrate', 
  * pointer is additional and never a replacement, so both assertions are made on
  * the same run: the branch's own sentence and the clause after it.
  *
+ * Each pins a different property, and the order they are written in is not the
+ * order they fire in. The branch's own sentence is asserted first, so a mutation
+ * that makes the pointer a *replacement* — deleting a branch's own warn() and
+ * leaving the pointer behind — fails there and the pointer clause below it never
+ * runs; measured, and it takes both datasets down at that first assertion. What
+ * the pointer clause pins is the other direction: that the pointer is present on
+ * a blind run and absent on an --order-id one, which the branch's own sentence
+ * cannot see either way.
+ *
  * The mode note carrying the same advice is printed before the send, above the
  * six configuration lines and the "Sending one GetPaymentId request" line. The
  * package's own argument for repeating a premise in the verdict — proven()'s
@@ -1026,14 +1035,16 @@ it('reports a non-string credential as the wrong type it is, never as absent', f
  * The same mistake on the one key that is not a credential, which is the only
  * place the command's own refusal can be observed.
  *
- * `CheckCommand::configString()` is read by `environment()` and by nothing
- * else: the three credential lines go through `masked()` and `presence()`,
- * which describe a value rather than use one and so print a placeholder. So
- * this is the run where the *command* raises the wrong-type refusal rather
- * than the provider, and it happens before a single detail line is printed.
+ * `ConfigReader::string()` is reached from this command by `environment()` and
+ * by nothing else: the three credential lines go through `masked()` and
+ * `presence()`, which take the raw value from `ConfigReader::value()` and
+ * describe it rather than use it, so they print a placeholder. So this is the
+ * run where the wrong-type refusal is raised on the command's own side of the
+ * bridge rather than the provider's, and it happens before a single detail
+ * line is printed.
  *
- * The old reading is asserted absent. `configString()` used to answer '' for
- * anything that was not a string, so a numeric environment reached
+ * The old reading is asserted absent. The command's reader used to answer ''
+ * for anything that was not a string, so a numeric environment reached
  * `Environment::tryFrom('')` and produced a refusal about a blank environment
  * nobody had configured — the exact sentence a regression would print again.
  */
@@ -1117,12 +1128,14 @@ it('refuses an unresolvable back_url before it sends anything', function (): voi
  *
  * The message asserted is the factory's own, so a reworded message updates in
  * one place and this test follows it. The route-not-found message is built from
- * *its* factory and asserted absent, which is what pins that the two cases have
- * two messages: routing the parameterised case back through
- * unresolvableBackUrlRoute() turns that assertion red immediately, and no
- * literal fragment of either message is hand-copied here to drift. And the
- * framework class is asserted absent, because its appearance in the output is
- * exactly what escaping to the terminal clause looks like.
+ * *its* factory and asserted absent, which pins that the command prints one of
+ * the two messages and not both. The positive assertion above it is what
+ * catches the two cases being collapsed — routing the parameterised case back
+ * through unresolvableBackUrlRoute() fails there, four assertions earlier, and
+ * this one never runs on that mutation; this one catches them being printed
+ * together. No literal fragment of either message is hand-copied here to drift.
+ * And the framework class is asserted absent, because its appearance in the
+ * output is exactly what escaping to the terminal clause looks like.
  *
  * `Password: (set)` pins that the run reached the credential block before it
  * failed; without it the test would still pass if the failure moved upstream.

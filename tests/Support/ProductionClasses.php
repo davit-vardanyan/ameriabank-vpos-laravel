@@ -165,6 +165,27 @@ final class ProductionClasses
      * invisible to `all()`, and a second directory walk cannot drift away from
      * the first because there is no second walk.
      *
+     * **Every shipped file is either swept or refused, and that is the property
+     * the textual guards rest on.** A `.php` file under a PSR-4 directory that
+     * declares no matching class is not quietly skipped: `classesUnder()`
+     * derives a class name from its path regardless of what it contains, and
+     * `all()` then requires that name to autoload. Both outcomes are loud, and
+     * both were produced by hand rather than reasoned about:
+     *
+     * - a file declaring nothing at all — `src/Support/nothing.php` — reaches
+     *   `all()`'s existence check, fails it, and throws *"does not autoload;
+     *   the PSR-4 map and the filesystem disagree"*;
+     * - a file declaring a free function or a constant is included by the
+     *   autoloader once per existence check, so the second check re-declares
+     *   what the first declared and the run dies on that. Measured with
+     *   `src/Support/helpers.php` and `src/Support/values.php`: thirteen arch
+     *   guards red, every one of them through this method.
+     *
+     * So a `src/helpers.php` reached through `autoload.files` cannot slip past
+     * these sweeps unseen either — `all()` refuses to run at all when
+     * `autoload` carries any key but `psr-4`. What is never possible is the
+     * quiet outcome: a shipped file that no sweep looks at and nothing says so.
+     *
      * Deduplicated and sorted; several classes may share one file.
      *
      * @return list<string>
@@ -235,11 +256,57 @@ final class ProductionClasses
      */
     private static function classesUnder(string $base, string $prefix): array
     {
-        if (! is_dir($base)) {
-            throw new RuntimeException(sprintf('The PSR-4 map points at %s, which is not a directory.', $base));
+        $classNames = [];
+
+        foreach (self::phpFilesUnder($base) as $path) {
+            $relative = substr($path, strlen($base) + 1, -4);
+
+            /** @var class-string $className */
+            $className = $prefix.str_replace('/', '\\', $relative);
+            $classNames[] = $className;
         }
 
-        $classNames = [];
+        return $classNames;
+    }
+
+    /**
+     * Every `.php` file under $base, found by one traversal that every caller
+     * shares so that none can drift from another.
+     *
+     * **Public, because a guard's subject list is not always a class list.**
+     * `files()` bridges classes back to their paths, which is exact for `src/`
+     * and works only there: every production file declares a class and `all()`
+     * refuses one that does not. A Pest test file declares no class at all —
+     * the tests are closures and the file is included by name — and
+     * `config/ameriabank-vpos.php` returns an array and declares nothing, so
+     * neither can be reached by reflection and both are analysed at level 10.
+     * A rule that binds wherever the analyser runs therefore needs a walk, and
+     * it needs to be *this* walk: a second traversal written in the guard would
+     * be a second implementation of the same thing, free to drift from this one
+     * in whichever direction nobody looked.
+     *
+     * The caller decides which roots to walk. `tests/Arch/AnalysisSuppressionTest.php`
+     * takes them from `phpstan.neon.dist`'s own `paths:` block, so the sweep's
+     * reach is the value the analyser's reach is rather than a second list that
+     * agrees with it today.
+     *
+     * Unsorted, and every caller sorts what it collects: the traversal order is
+     * whatever `scandir()` and the pending stack produce, and a guard comparing
+     * or reporting a set wants a stable order for the whole set rather than for
+     * each root separately.
+     *
+     * @return list<string>
+     */
+    public static function phpFilesUnder(string $base): array
+    {
+        if (! is_dir($base)) {
+            throw new RuntimeException(sprintf(
+                '%s is not a directory, so the files under it cannot be walked. Something derived it as a place code lives — a PSR-4 map, or the analyser\'s own paths — and the filesystem disagrees.',
+                $base,
+            ));
+        }
+
+        $paths = [];
         $pending = [$base];
 
         while ($pending !== []) {
@@ -267,14 +334,10 @@ final class ProductionClasses
                     continue;
                 }
 
-                $relative = substr($path, strlen($base) + 1, -4);
-
-                /** @var class-string $className */
-                $className = $prefix.str_replace('/', '\\', $relative);
-                $classNames[] = $className;
+                $paths[] = $path;
             }
         }
 
-        return $classNames;
+        return $paths;
     }
 }

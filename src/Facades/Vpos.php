@@ -30,7 +30,12 @@ use Illuminate\Support\Facades\Facade;
  * site, and without them PHPStan sees `mixed` from the first arrow onwards and
  * every type error after it goes unreported — a blind spot exactly where the
  * money is. They are transcribed from the client's own signatures and must be
- * corrected whenever those change.
+ * corrected whenever those change. That is checked rather than remembered:
+ * `tests/Arch/FacadeContractTest.php` derives the client from
+ * `getFacadeAccessor()` and compares the tags against its reflected methods in
+ * both directions, so a tag with no method behind it and a method with no tag
+ * each fail the suite. The guard records what it deliberately does not
+ * compare; read it before adjusting a tag to make it pass.
  *
  * @method static PaymentsClient payments()
  * @method static BindingsClient bindings()

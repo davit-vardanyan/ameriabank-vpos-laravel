@@ -64,6 +64,28 @@ use Illuminate\Support\Facades\Facade;
  * rather than types. Whether a parameter is optional at all is compared, which
  * is the half that changes what a call site may legally omit.
  *
+ * **Only native types are compared, and a generic tag cannot currently be
+ * written.** `reflectedTypeName()` reads `ReflectionMethod::getReturnType()`
+ * and `ReflectionParameter::getType()`, so a drift that lives only in the
+ * client's PHPDoc — `@return list<Payment>` becoming `@return array<string,
+ * Payment>` while the native type stays `array` — is invisible here, and
+ * `resolveFacadeDocblockType()` treats any non-builtin, non-imported token as a
+ * class name, so `@method static list<Payment> all()` resolves to
+ * `...\Facades\list<Payment>` and this guard fails. Both are the same limit:
+ * what is compared is the type system PHP enforces, not the one PHPStan reads.
+ * Nothing drifts today — the tags on `src/Facades/Vpos.php` are all concrete
+ * class or scalar types.
+ *
+ * The failure on a generic tag is loud, which is the safe direction, but the
+ * shortest way out of it is the wrong one. **When a generic tag is genuinely
+ * needed, teach the resolver — never weaken the tag.** Weakening
+ * `list<Payment>` to `array` to get past this guard destroys exactly the
+ * analysis the tags exist to restore: a merchant's `foreach` over the result
+ * goes back to `mixed`, silently, in a package whose subject is money. Teaching
+ * the resolver means resolving only the head of a `Head<...>` token as a class
+ * name and recursing into its members; that is real work, and it is the work
+ * this boundary is asking for rather than an excuse to skip.
+ *
  * ## Why this is reflection and not an arch() expectation
  *
  * It relates a class to a *docblock*. pest-plugin-arch expresses relationships

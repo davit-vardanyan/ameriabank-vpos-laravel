@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use DavitVardanyan\AmeriabankVpos\Laravel\Tests\Support\ProductionClasses;
+
 /*
  * The line coverage floor may not go missing, and may not go down.
  *
@@ -29,6 +31,16 @@ declare(strict_types=1);
  * script, and the pattern is applied to the decoded string. Nothing here can
  * be affected by, or tempt anyone to normalise, the escaping.
  *
+ * That argument is about the *number of decoding steps*, not about who
+ * performs them, so it does not reach the read itself.
+ * `ProductionClasses::manifest()` is `file_get_contents()` followed by one
+ * `json_decode($raw, true, 512, JSON_THROW_ON_ERROR)` — the same single step,
+ * with no normalising of its own — and `MutationEscapeHatchTest` already reads
+ * the equally escape-sensitive `mutate` script through it. Keeping a private
+ * copy of twelve lines here would have bought nothing and would have left this
+ * the one guard in the suite that reads the manifest its own way, which is the
+ * drift the helper exists to end.
+ *
  * The pattern deliberately pins the comparison and both exit codes rather than
  * hunting for a loose "100" anywhere in the script — the script already
  * contains other numbers, and a match on the wrong one would be a guard that
@@ -38,18 +50,8 @@ declare(strict_types=1);
  * quiet failure mode.
  */
 it('holds the line coverage floor in composer.json at exactly 100', function (): void {
-    $manifestPath = dirname(__DIR__, 2).'/composer.json';
-    $rawManifest = file_get_contents($manifestPath);
-
-    if ($rawManifest === false) {
-        throw new RuntimeException(sprintf('Unable to read %s.', $manifestPath));
-    }
-
-    $manifest = json_decode($rawManifest, true, 512, JSON_THROW_ON_ERROR);
-
-    if (! is_array($manifest)) {
-        throw new RuntimeException(sprintf('%s does not decode to an object.', $manifestPath));
-    }
+    $manifestPath = ProductionClasses::root().'/composer.json';
+    $manifest = ProductionClasses::manifest();
 
     $scripts = $manifest['scripts'] ?? null;
 

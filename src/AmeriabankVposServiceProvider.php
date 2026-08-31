@@ -14,6 +14,7 @@ use DavitVardanyan\AmeriabankVpos\Exception\ValidationException;
 use DavitVardanyan\AmeriabankVpos\Laravel\Commands\CheckCommand;
 use DavitVardanyan\AmeriabankVpos\Laravel\Exception\ConfigurationException;
 use DavitVardanyan\AmeriabankVpos\Laravel\Support\BackUrlResolver;
+use DavitVardanyan\AmeriabankVpos\Laravel\Support\ConfigReader;
 use DavitVardanyan\AmeriabankVpos\Vpos;
 use Illuminate\Contracts\Config\Repository;
 use Illuminate\Contracts\Foundation\Application;
@@ -27,7 +28,6 @@ use Psr\Log\NullLogger;
 
 use function get_debug_type;
 use function is_int;
-use function is_string;
 
 /**
  * Wires the Ameriabank vPOS client into a Laravel application.
@@ -85,11 +85,6 @@ use function is_string;
 final class AmeriabankVposServiceProvider extends ServiceProvider
 {
     /**
-     * The configuration namespace, and the published file's base name.
-     */
-    private const string CONFIG_KEY = 'ameriabank-vpos';
-
-    /**
      * The publish tag a merchant passes to `vendor:publish`.
      */
     private const string CONFIG_TAG = 'ameriabank-vpos-config';
@@ -103,7 +98,8 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
      * against the same constant, so a typo is a fatal at the call site instead
      * of a binding that is silently never found.
      *
-     * It is written out in full rather than composed from `CONFIG_KEY`. A
+     * It is written out in full rather than composed from
+     * `ConfigReader::CONFIG_KEY`. A
      * class constant whose initialiser is a concatenation is mutated by
      * `pest-plugin-mutate` and can never be covered by it — a `const` is not an
      * executable statement, so it appears in no coverage report and every
@@ -116,9 +112,9 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
 
     public function register(): void
     {
-        $this->mergeConfigFrom($this->configPath(), self::CONFIG_KEY);
+        $this->mergeConfigFrom($this->configPath(), ConfigReader::CONFIG_KEY);
 
-        $this->app->singleton(Vpos::class, fn (Application $app): Vpos => $this->makeVpos($app));
+        $this->app->singleton(Vpos::class, fn (): Vpos => $this->makeVpos());
 
         $this->app->bind(
             PaymentsClient::class,
@@ -137,7 +133,7 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
 
         $this->app->bind(
             VposCallback::class,
-            static fn (Application $app): VposCallback => self::makeCallback($app),
+            fn (): VposCallback => $this->makeCallback(),
         );
 
         $this->app->bind(
@@ -161,7 +157,7 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->publishes(
-            [$this->configPath() => $this->app->configPath(self::CONFIG_KEY.'.php')],
+            [$this->configPath() => $this->app->configPath(ConfigReader::CONFIG_KEY.'.php')],
             self::CONFIG_TAG,
         );
 
@@ -175,7 +171,7 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
      */
     private function configPath(): string
     {
-        return __DIR__.'/../config/'.self::CONFIG_KEY.'.php';
+        return __DIR__.'/../config/'.ConfigReader::CONFIG_KEY.'.php';
     }
 
     /**
@@ -195,24 +191,48 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
      * what makes the client's own `ValidationException` unreachable for this
      * cause rather than merely pre-empted.
      *
+     * **Every method this class declares reaches the container through `$this`
+     * and takes neither it nor the configuration repository as an argument.**
+     * That is what keeps `Object(Illuminate\Config\Repository)` — and the
+     * container it can be reached through — out of the frames these methods
+     * contribute to the refusals they raise. `makeCallback()` below is why this
+     * is stated rather than assumed: it reads no configuration, so it was left
+     * taking the container while the rest of this class was narrowed, and its
+     * refusal put `Illuminate\Foundation\Application` into frame 1 of a trace
+     * that reaches the application's exception handler. Reading configuration
+     * was never the test; handing out something that reaches it is.
+     *
+     * The sentence is about the frames this package writes, and those can be
+     * told apart from the rest by name. A frame naming a method of this class
+     * is one whose parameter list is declared here. The first frame that is not
+     * is `AmeriabankVposServiceProvider::{closure}` — the closure `register()`
+     * hands to `bind()` — and it records
+     * `(Illuminate\Foundation\Application, array)` whatever that closure
+     * declares: measured on the `Vpos` binding, whose closure declares no
+     * parameters and whose frame carries both regardless, because the container
+     * passes itself to everything it builds from. No parameter list removes
+     * that frame, so it is residue rather than something this class fixed.
+     * `ConfigReader` sets out the measurement and what does close it, which is
+     * not this package.
+     *
      * @throws ConfigurationException on a key set to the wrong type, an unknown
      *                                environment, an attempt budget the client would not accept, or a
      *                                package-scoped HTTP client binding that is not a PSR-18 client
      */
-    private function makeVpos(Application $app): Vpos
+    private function makeVpos(): Vpos
     {
-        $config = $app->make(Repository::class);
+        $config = $this->packageConfig();
 
         return new Vpos(
             credentials: new Credentials(
-                clientId: $this->configString($config, 'client_id'),
-                username: $this->configString($config, 'username'),
-                password: $this->configString($config, 'password'),
+                clientId: $config->string('client_id'),
+                username: $config->string('username'),
+                password: $config->string('password'),
             ),
-            environment: $this->environment($config),
-            httpClient: $this->httpClient($app),
-            logger: $this->logger($config),
-            maxAttempts: $this->maxAttempts($config),
+            environment: $this->environment(),
+            httpClient: $this->httpClient(),
+            logger: $this->logger(),
+            maxAttempts: $this->maxAttempts(),
         );
     }
 
@@ -258,16 +278,18 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
      * The refusal is handed the resolved value's *type*, not the value. What is
      * bound there is arbitrary — a factory's return, a client wrapping an API
      * token — and a factory taking it would put it in frame 0 of the trace the
-     * exception carries, which is logged. `configString()` gives the full
-     * reasoning; this site follows it.
+     * exception carries, which is logged. `ConfigReader` gives the full
+     * reasoning; this site follows it, and takes no argument for the same
+     * reason: the container is reached through `$this`, so the refusal's frame
+     * 1 carries nothing a reporter could walk into the credentials through.
      *
      * @throws ConfigurationException when the package-scoped key is bound to something
      *                                that does not implement PSR-18
      */
-    private function httpClient(Application $app): ?ClientInterface
+    private function httpClient(): ?ClientInterface
     {
-        if ($app->bound(self::HTTP_CLIENT_KEY)) {
-            $scoped = $app->make(self::HTTP_CLIENT_KEY);
+        if ($this->app->bound(self::HTTP_CLIENT_KEY)) {
+            $scoped = $this->app->make(self::HTTP_CLIENT_KEY);
 
             if ($scoped instanceof ClientInterface) {
                 return $scoped;
@@ -276,8 +298,8 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
             throw ConfigurationException::httpClientNotPsr18(self::HTTP_CLIENT_KEY, get_debug_type($scoped));
         }
 
-        if ($app->bound(ClientInterface::class)) {
-            return $app->make(ClientInterface::class);
+        if ($this->app->bound(ClientInterface::class)) {
+            return $this->app->make(ClientInterface::class);
         }
 
         return null;
@@ -294,12 +316,17 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
      * so the refusal is wrapped in a message that supplies the context and
      * keeps the original as its cause.
      *
+     * Takes no argument and is not static, for the reason `makeVpos()` sets
+     * out: it reads no configuration, but the container it was handed reaches
+     * the credentials in one hop, and this is the refusal that escapes to the
+     * application's exception handler.
+     *
      * @throws ConfigurationException when this request carries no readable vPOS callback
      */
-    private static function makeCallback(Application $app): VposCallback
+    private function makeCallback(): VposCallback
     {
         try {
-            return VposCallback::fromQuery($app->make(Request::class)->query->all());
+            return VposCallback::fromQuery($this->app->make(Request::class)->query->all());
         } catch (ValidationException $failure) {
             throw ConfigurationException::callbackOutsideRequest($failure);
         }
@@ -311,9 +338,9 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
      * @throws ConfigurationException on any value the client does not know, and
      *                                on a key set to something other than a string
      */
-    private function environment(Repository $config): Environment
+    private function environment(): Environment
     {
-        $value = $this->configString($config, 'environment');
+        $value = $this->packageConfig()->string('environment');
 
         return Environment::tryFrom($value)
             ?? throw ConfigurationException::unknownEnvironment($value);
@@ -331,62 +358,48 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
      * the only route to a *named* channel that `illuminate/support` exposes; a
      * blank channel name resolves the application's default channel.
      */
-    private function logger(Repository $config): LoggerInterface
+    private function logger(): LoggerInterface
     {
-        if ($config->get(self::CONFIG_KEY.'.logging.enabled') !== true) {
+        $config = $this->packageConfig();
+
+        if ($config->value('logging.enabled') !== true) {
             return new NullLogger;
         }
 
-        $channel = $this->configString($config, 'logging.channel');
+        $channel = $config->string('logging.channel');
 
         return Log::channel($channel === '' ? null : $channel);
     }
 
     /**
-     * A package configuration value as a string.
+     * A reader over the configuration repository the container holds *now*.
      *
-     * Three outcomes, and the middle one is the reason this is not a one-line
-     * `is_string()` read any more:
+     * This provider used to carry its own eight-line `configString()`, and
+     * `vpos:check` carried a byte-identical one under a docblock stating the
+     * coupling as a requirement. `ConfigReader` is that reader, extracted, so
+     * the requirement holds by construction rather than by two docblocks
+     * agreeing; its own docblock carries the reasoning that used to live here.
      *
-     * - a string is returned as it was configured;
-     * - `null` — a missing key, or an environment variable that is not set —
-     *   reads as blank, and blank is refused by whichever component was asked
-     *   for it, in that component's own words. The value really is absent, so
-     *   "must not be blank" is the true account of it;
-     * - anything else is **set to the wrong type**, and is refused here by
-     *   name. Reading it as blank too would send the absent-value refusal for a
-     *   value that is present, and an operator told a key is missing goes
-     *   looking for a missing one.
+     * What is narrower than before, and deliberately so: `configString()`
+     * carried the configuration repository and the key in its own frame, and
+     * said so. `ConfigReader::string()` carries the key alone, because the
+     * repository sits on the reader rather than in its parameter list and
+     * `Exception::getTrace()` records no `object` key. That is a narrowing of
+     * the claim, not a widening of it — the sentence about frames this package
+     * did not build still stands, and the container still reaches the closure
+     * this provider registers, which is where the residue now lives.
      *
-     * **The value is read here and handed on nowhere.** `get_debug_type()` is
-     * called at this throw site and `notAString()` is given the resulting type
-     * name, so the value is never an argument to a call that outlives this
-     * method. That matters because the exception is constructed inside the
-     * factory, which makes the factory's own call frame 0 of the trace the
-     * exception carries — and `getTraceAsString()` renders a frame's arguments
-     * verbatim into whatever logs it. A factory taking the value would have
-     * kept the credential out of the message and put it into the log.
-     *
-     * What that establishes is narrow and worth stating exactly: the two
-     * arguments this method passes onwards are a key and a type name, and its
-     * own frame carries the configuration repository and the key. It does not
-     * establish anything about frames this package did not build.
-     *
-     * @throws ConfigurationException when the key is set to something other than a string
+     * A fresh reader per call rather than a cached one. Caching would pin the
+     * repository the first read happened to see, and `Vpos` can be built more
+     * than once in a process — a queue worker reloading configuration, a test
+     * calling `forgetInstance(Vpos::class)` after rebinding `config` — so a
+     * cached reader would build the client from credentials no longer in
+     * force. It is the hazard `BackUrlResolver` is bound rather than shared to
+     * avoid, and it takes the same answer here.
      */
-    private function configString(Repository $config, string $key): string
+    private function packageConfig(): ConfigReader
     {
-        $value = $config->get(self::CONFIG_KEY.'.'.$key);
-
-        if ($value === null) {
-            return '';
-        }
-
-        if (is_string($value)) {
-            return $value;
-        }
-
-        throw ConfigurationException::notAString($key, get_debug_type($value));
+        return new ConfigReader($this->app->make(Repository::class));
     }
 
     /**
@@ -404,7 +417,7 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
      * A non-integer is refused rather than read as `0`. Zero was out of range
      * and so was refused anyway, but by a message naming a number nobody
      * configured. The type is resolved here and the value is not passed on, for
-     * the reason `configString()` gives: a factory's parameters become frame 0's
+     * the reason `ConfigReader` gives: a factory's parameters become frame 0's
      * arguments in the trace its exception carries. `max_attempts` is not a
      * credential; the shape of the call is the same one either way.
      *
@@ -416,22 +429,30 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
      * a mutant that moves either bound changes both the accepted range and the
      * printed one.
      *
-     * They duplicate a bound the client owns, and the client keeps it private
-     * (`HttpTransport::MINIMUM_ATTEMPTS` and `MAXIMUM_ATTEMPTS`), so there is
-     * nothing to derive it from. The duplication is safe in the direction that
-     * matters: if the client ever narrows its range, a value this check accepts
-     * and the client refuses arrives as the client's own `ValidationException`
-     * and is reported by `CheckCommand::configuredValueRefused()` in the
-     * client's words, which is the generic branch's purpose.
+     * They duplicate a bound the client owns. The client keeps it private
+     * (`HttpTransport::MINIMUM_ATTEMPTS` and `MAXIMUM_ATTEMPTS`), which is not
+     * the same as unreadable: `ReflectionClassConstant::getValue()` reads a
+     * private constant, and `tests/Arch/AttemptBudgetBoundsTest.php` reads both
+     * at test time and asserts that the budgets this provider actually accepts
+     * are exactly the client's range, and that the refusal prints that same
+     * pair. So the duplication is held rather than merely argued for, and the
+     * day the client moves a bound this package goes red instead of drifting.
+     *
+     * The safe direction is the fallback behind that guard rather than the only
+     * protection: if the two ever did diverge in a running application, a value
+     * this check accepts and the client refuses arrives as the client's own
+     * `ValidationException` and is reported by
+     * `CheckCommand::configuredValueRefused()` in the client's words, which is
+     * the generic branch's purpose.
      *
      * @throws ConfigurationException when the key is not an integer, or is outside the accepted range
      */
-    private function maxAttempts(Repository $config): int
+    private function maxAttempts(): int
     {
         $lowestBudget = 1;
         $highestBudget = 5;
 
-        $value = $config->get(self::CONFIG_KEY.'.max_attempts');
+        $value = $this->packageConfig()->value('max_attempts');
 
         if (! is_int($value) || $value < $lowestBudget || $value > $highestBudget) {
             throw ConfigurationException::invalidMaxAttempts(get_debug_type($value), $lowestBudget, $highestBudget);

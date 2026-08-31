@@ -60,12 +60,13 @@ it('refuses an environment the client does not know, naming the value', function
 /*
  * The wrong-typed environment, which used to be reported as a blank one.
  *
- * `configString()` read anything that was not a string as `''`, so a numeric
- * environment arrived at `Environment::tryFrom('')` and produced *Unknown
- * Ameriabank vPOS environment ""* — a message about a value nobody configured,
- * over a key that is plainly set. The type is now named as the mistake it is,
- * and the old message is asserted absent so that a regression to the blank
- * reading cannot pass here.
+ * The provider's reader — one copy of what is now `ConfigReader::string()` —
+ * read anything that was not a string as `''`, so a numeric environment
+ * arrived at `Environment::tryFrom('')` and produced *Unknown Ameriabank vPOS
+ * environment ""* — a message about a value nobody configured, over a key that
+ * is plainly set. The type is now named as the mistake it is, and the old
+ * message is asserted absent so that a regression to the blank reading cannot
+ * pass here.
  */
 it('refuses an environment set to something that is not a string, naming its type', function (): void {
     vposConfig(['ameriabank-vpos.environment' => 42]);

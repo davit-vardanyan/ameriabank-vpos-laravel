@@ -56,6 +56,34 @@ use DavitVardanyan\AmeriabankVpos\Laravel\Tests\Support\ProductionClasses;
  * suppression whose justification is not written down is indistinguishable, six
  * months later, from one somebody added to make a run go green.
  *
+ * **The policy binds wherever the analyser runs, and the sweep is derived from
+ * the same key that decides where that is.** `phpstan.neon.dist` names three
+ * directories in `paths` — `src`, `tests` and `config` — and an ignore in any of
+ * them is honoured by the analyser in full. That sentence was written here once
+ * before over a sweep of two autoload maps, which covered two of the three: a
+ * line-wide, reasonless directive appended to `config/ameriabank-vpos.php` was
+ * measured green under the expectation named for binding wherever the analyser
+ * runs. The claim and the mechanism had different sources of truth, and the
+ * mechanism agreed with the claim only by coincidence.
+ *
+ * So the subject list is now `paths` itself, walked with
+ * `ProductionClasses::phpFilesUnder()`, and a fourth analysed directory joins
+ * the sweep without anybody editing this file. `src` is the one exception and it
+ * is reached by `ProductionClasses::files()` instead, because reflecting the
+ * production classes back to their paths carries a guarantee a walk does not:
+ * every shipped file is either swept or refused, since a `.php` file under a
+ * PSR-4 root that declares no matching class stops `all()` rather than being
+ * skipped. `config/ameriabank-vpos.php` is exactly such a file — it returns an
+ * array and declares nothing — which is why it has to arrive by the walk and
+ * cannot arrive through `files()`.
+ *
+ * The scoped version of this guard left the more dangerous halves unheld: a
+ * level-10 finding in a *new test* is what tempts somebody to reach for a
+ * directive, and this task's predecessors fixed three such findings rather than
+ * suppressing them precisely because that is the standard; while the realistic
+ * suppression in `config/` is one silencing Larastan about `env()`'s return
+ * type, which is the exact shortcut this policy exists to bound.
+ *
  * ## Why this is not an arch() expectation
  *
  * Both halves relate code to phpstan.neon.dist and to a *comment*.
@@ -65,7 +93,8 @@ use DavitVardanyan\AmeriabankVpos\Laravel\Tests\Support\ProductionClasses;
  * here, and the standing prohibition on hand-rolling reflection guards where
  * arch() covers the ground does not apply.
  *
- * These read only phpstan.neon.dist and src/, both tracked, and nothing a gate
+ * These read only phpstan.neon.dist, composer.json and the directories that
+ * file points at — src/, tests/ and config/ — all tracked, and nothing a gate
  * run produces. They are green on a fresh clone.
  */
 
@@ -127,56 +156,109 @@ function analysisConfiguration(): array
 function directoriesRequiringAnalysis(): array
 {
     $manifest = ProductionClasses::manifest();
-    $required = [];
-
-    foreach (['autoload', 'autoload-dev'] as $section) {
-        $declared = $manifest[$section] ?? null;
-
-        if (! is_array($declared)) {
-            throw new RuntimeException(sprintf(
-                'composer.json declares no "%s" section, so this guard cannot tell which directories hold code.',
-                $section,
-            ));
-        }
-
-        /*
-         * Only PSR-4 is understood, exactly as in ProductionClasses::all().
-         * Code arriving through another mechanism would be invisible here, and
-         * invisible in the direction that passes, so it refuses to run instead.
-         */
-        $unsupported = array_diff(array_keys($declared), ['psr-4']);
-
-        if ($unsupported !== []) {
-            throw new RuntimeException(sprintf(
-                'composer.json autoloads through "%s" in its "%s" section, which this guard cannot resolve to a directory. Teach it that mechanism rather than letting code become invisible to it.',
-                implode('", "', array_map(static fn (int|string $key): string => (string) $key, $unsupported)),
-                $section,
-            ));
-        }
-
-        $psr4 = $declared['psr-4'] ?? null;
-
-        if (! is_array($psr4) || $psr4 === []) {
-            throw new RuntimeException(sprintf('composer.json\'s "%s" section declares no PSR-4 map.', $section));
-        }
-
-        foreach ($psr4 as $directory) {
-            if (! is_string($directory)) {
-                throw new RuntimeException(sprintf('composer.json\'s "%s" PSR-4 map points at something that is not a path.', $section));
-            }
-
-            $required[] = trim($directory, '/');
-        }
-    }
-
-    foreach (packagedConfigurationDirectories($manifest) as $directory) {
-        $required[] = $directory;
-    }
+    $required = [
+        ...psr4Directories($manifest, 'autoload'),
+        ...psr4Directories($manifest, 'autoload-dev'),
+        ...packagedConfigurationDirectories($manifest),
+    ];
 
     $required = array_values(array_unique($required));
     sort($required);
 
     return $required;
+}
+
+/**
+ * The directories one of composer.json's PSR-4 maps resolves against.
+ *
+ * Separated from its caller because the production half is needed on its own:
+ * `analysedFiles()` reaches `src/` by reflection rather than by walking it, and
+ * it has to know which of the analysed directories that applies to without
+ * being told.
+ *
+ * @param  array<array-key, mixed>  $manifest
+ * @return list<string>
+ */
+function psr4Directories(array $manifest, string $section): array
+{
+    $declared = $manifest[$section] ?? null;
+
+    if (! is_array($declared)) {
+        throw new RuntimeException(sprintf(
+            'composer.json declares no "%s" section, so this guard cannot tell which directories hold code.',
+            $section,
+        ));
+    }
+
+    /*
+     * Only PSR-4 is understood, exactly as in ProductionClasses::all(). Code
+     * arriving through another mechanism would be invisible here, and invisible
+     * in the direction that passes, so it refuses to run instead.
+     */
+    $unsupported = array_diff(array_keys($declared), ['psr-4']);
+
+    if ($unsupported !== []) {
+        throw new RuntimeException(sprintf(
+            'composer.json autoloads through "%s" in its "%s" section, which this guard cannot resolve to a directory. Teach it that mechanism rather than letting code become invisible to it.',
+            implode('", "', array_map(static fn (int|string $key): string => (string) $key, $unsupported)),
+            $section,
+        ));
+    }
+
+    $psr4 = $declared['psr-4'] ?? null;
+
+    if (! is_array($psr4) || $psr4 === []) {
+        throw new RuntimeException(sprintf('composer.json\'s "%s" section declares no PSR-4 map.', $section));
+    }
+
+    $directories = [];
+
+    foreach ($psr4 as $directory) {
+        if (! is_string($directory)) {
+            throw new RuntimeException(sprintf('composer.json\'s "%s" PSR-4 map points at something that is not a path.', $section));
+        }
+
+        $directories[] = trim($directory, '/');
+    }
+
+    return $directories;
+}
+
+/**
+ * The directories `phpstan.neon.dist` actually points the analyser at.
+ *
+ * Read back rather than assumed, and read back in one place: the expectation
+ * that requires this package's directories to be among them and the sweep that
+ * visits them are then two questions about the same value, which is the whole
+ * point of the fix that put this function here.
+ *
+ * The block form is the only one this package writes and the only one read
+ * back. A `paths:` written as an inline list would leave the sequence
+ * unreadable here, and an unreadable configuration is refused rather than
+ * treated as an empty one — an empty one would make every requirement below
+ * unmet, which is loud, but it would report the wrong reason.
+ *
+ * @return list<string>
+ */
+function analysedDirectories(): array
+{
+    ['path' => $path, 'source' => $source] = analysisConfiguration();
+
+    if (preg_match('/^[ \t]*paths:[ \t]*$\n((?:[ \t]*-[ \t]*\S+[ \t]*$\n?)+)/m', $source, $block) !== 1) {
+        throw new RuntimeException(sprintf(
+            '%s declares no readable "paths" sequence, so nothing here can say what PHPStan analyses.',
+            $path,
+        ));
+    }
+
+    if (preg_match_all('/^[ \t]*-[ \t]*(\S+)[ \t]*$/m', $block[1], $items) === false) {
+        throw new RuntimeException(sprintf('Unable to read the analysed paths out of %s.', $path));
+    }
+
+    return array_map(
+        static fn (string $item): string => trim($item, "'\"/"),
+        $items[1],
+    );
 }
 
 /**
@@ -336,7 +418,7 @@ it('analyses at level 10 with no baseline', function (): void {
 });
 
 it('analyses every directory this package ships or tests', function (): void {
-    ['path' => $path, 'source' => $source] = analysisConfiguration();
+    ['path' => $path] = analysisConfiguration();
 
     /*
      * The level is what a weakening is expected to look like, and `paths` is
@@ -357,29 +439,7 @@ it('analyses every directory this package ships or tests', function (): void {
         'This package\'s own declarations resolved to no analysable directory at all, so this guard could not have seen a narrowed path even if one existed.'
     );
 
-    /*
-     * The block form is the only one this package writes and the only one read
-     * back. A `paths:` written as an inline list would leave the sequence
-     * unreadable here, and an unreadable configuration is refused rather than
-     * treated as an empty one — an empty one would make every requirement below
-     * unmet, which is loud, but it would report the wrong reason.
-     */
-    if (preg_match('/^[ \t]*paths:[ \t]*$\n((?:[ \t]*-[ \t]*\S+[ \t]*$\n?)+)/m', $source, $block) !== 1) {
-        throw new RuntimeException(sprintf(
-            '%s declares no readable "paths" sequence, so nothing here can say what PHPStan analyses.',
-            $path,
-        ));
-    }
-
-    if (preg_match_all('/^[ \t]*-[ \t]*(\S+)[ \t]*$/m', $block[1], $items) === false) {
-        throw new RuntimeException(sprintf('Unable to read the analysed paths out of %s.', $path));
-    }
-
-    $analysed = array_map(
-        static fn (string $item): string => trim($item, "'\"/"),
-        $items[1],
-    );
-
+    $analysed = analysedDirectories();
     $missing = [];
 
     foreach ($required as $directory) {
@@ -400,12 +460,79 @@ it('analyses every directory this package ships or tests', function (): void {
     ));
 });
 
-it('bounds every inline analysis suppression in production code', function (): void {
-    $files = ProductionClasses::files();
+/**
+ * Every file the analyser is pointed at, from the key that points it there.
+ *
+ * `phpstan.neon.dist`'s own `paths` is the subject list, so the sweep's reach
+ * and the analyser's reach are the same value rather than two lists that agree
+ * today. The sibling expectation above requires this package's own directories
+ * to be among them; this one visits whatever is there, including a directory
+ * nobody has added yet.
+ *
+ * **`src/` is reached by reflection and everything else by a walk**, and the
+ * asymmetry is the reflection guarantee rather than a preference.
+ * `ProductionClasses::files()` bridges classes back to paths, which is exact for
+ * `src/` because every file there declares a class and `all()` refuses one that
+ * does not — so a shipped file is either swept or loudly refused, never quietly
+ * skipped. Nothing outside `src/` has that property: a Pest test file declares
+ * no class at all, and `config/ameriabank-vpos.php` returns an array and
+ * declares nothing, so both would make `all()` throw if it were pointed at them
+ * and both must arrive by `phpFilesUnder()` instead.
+ *
+ * `src/` is therefore swept whether or not `paths` still names it. That is the
+ * safe direction and it costs nothing: a suppression in shipped code is a defect
+ * whichever directories the analyser is currently pointed at, and `paths`
+ * dropping a directory this package ships is what the sibling expectation above
+ * is for — it goes red rather than this sweep going quiet.
+ *
+ * Every root is required to yield at least one file, separately. A sweep that
+ * silently lost a root would go on reporting no violations, which is the
+ * failure direction this whole file refuses — and it is the direction the
+ * previous version of this function actually failed in, sweeping two autoload
+ * maps while the prose above it claimed the analyser's whole reach.
+ *
+ * @return list<string>
+ *
+ * @throws JsonException when composer.json is not valid JSON
+ */
+function analysedFiles(): array
+{
+    $production = ProductionClasses::files();
 
-    expect($files)->not->toBeEmpty(
+    expect($production)->not->toBeEmpty(
         'The production PSR-4 map resolved to no files at all, so this sweep could not have seen a suppression even if one existed.'
     );
+
+    $root = ProductionClasses::root();
+    $reflected = psr4Directories(ProductionClasses::manifest(), 'autoload');
+    $files = $production;
+
+    foreach (analysedDirectories() as $directory) {
+        if (in_array($directory, $reflected, true)) {
+            continue;
+        }
+
+        $walked = ProductionClasses::phpFilesUnder($root.'/'.$directory);
+
+        expect($walked)->not->toBeEmpty(sprintf(
+            'phpstan.neon.dist analyses %s and it holds no PHP file at all, so this sweep could not have seen a '
+            .'suppression there even if one existed. A directory that is analysed and holds nothing is either a '
+            .'stale path or a sweep that has lost a root; both are silent, and both leave a level-10 finding one '
+            .'directive away from being permanently forgiven.',
+            $directory,
+        ));
+
+        $files = [...$files, ...$walked];
+    }
+
+    $files = array_values(array_unique($files));
+    sort($files);
+
+    return $files;
+}
+
+it('bounds every inline analysis suppression wherever the analyser runs', function (): void {
+    $files = analysedFiles();
 
     $violations = [];
     $sites = [];
@@ -500,8 +627,9 @@ it('bounds every inline analysis suppression in production code', function (): v
     }
 
     expect($violations)->toBe([], sprintf(
-        "An inline analysis suppression in production code is unbounded:\n%s\n\n"
+        "An inline analysis suppression in code this package analyses is unbounded:\n%s\n\n"
         .'A suppression is permitted where the analyser is wrong about a framework behaviour. It must name the identifier it suppresses, must carry a one-line reason, and must never substitute for a fix. '
+        .'That binds everywhere phpstan.neon.dist points, which is tests/ as well as src/. '
         ."The %d suppression site(s) this guard found were:\n%s",
         implode("\n", $violations),
         count($sites),

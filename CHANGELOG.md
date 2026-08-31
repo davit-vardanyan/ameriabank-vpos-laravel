@@ -193,6 +193,32 @@ and this project adheres to
   a verdict on the credentials. It asserts neither a setting nor a send, because
   the core raises a configuration refusal after a send too.
 
+### Security
+
+- **No method this package declares takes the container or the configuration
+  repository as an argument.** Every one reaches them through `$this` instead, so
+  a refusal raised while a binding resolves carries neither in the frames this
+  package contributes. This matters because a stack trace has two forms that
+  disclose different amounts: `getTraceAsString()` renders an object argument as
+  `Object(Illuminate\Config\Repository)` and never walks into it, but
+  `getTrace()` frame arguments are the live objects, and an error reporter that
+  walks the trace itself reads whatever those objects hold. `Exception::getTrace()`
+  produces no `object` key at all, measured on PHP 8.3 and 8.5 under both
+  `zend.exception_ignore_args` settings, so the instance holding the repository is
+  not in the trace either.
+- **What the framework builds is outside any package's reach, and one of those
+  frames is in this package's traces.** The container hands itself to the closure
+  a service provider registers, whatever that closure declares, so a refusal
+  raised while one of the bindings resolves still carries an
+  `AmeriabankVposServiceProvider::{closure}` frame with an
+  `Illuminate\Foundation\Application` argument. A container reaches the
+  configuration repository. Closing that is `zend.exception_ignore_args`, which
+  PHP's own `php.ini-production` turns on and which removes `args` from every
+  frame for every package at once, or the error reporter's own scrubbing
+  configuration. The README's "Stack traces, and what an error reporter can reach"
+  sets out both, and says to confirm the result on a test event rather than
+  assume it.
+
 ### Notes
 
 - Requires PHP `^8.3` and Laravel 12 or 13. Laravel 11 and below are not

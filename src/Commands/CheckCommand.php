@@ -17,15 +17,14 @@ use DavitVardanyan\AmeriabankVpos\Exception\TransportException;
 use DavitVardanyan\AmeriabankVpos\Exception\ValidationException;
 use DavitVardanyan\AmeriabankVpos\Laravel\Exception\ConfigurationException;
 use DavitVardanyan\AmeriabankVpos\Laravel\Support\BackUrlResolver;
+use DavitVardanyan\AmeriabankVpos\Laravel\Support\ConfigReader;
 use DavitVardanyan\AmeriabankVpos\Response\ResponseCode;
 use DavitVardanyan\AmeriabankVpos\Vpos;
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Config\Repository;
-use Illuminate\Contracts\Foundation\Application;
 use Throwable;
 
 use function filter_var;
-use function get_debug_type;
 use function is_string;
 use function sprintf;
 use function str_replace;
@@ -101,11 +100,6 @@ final class CheckCommand extends Command
     protected $description = 'Ask the Ameriabank vPOS gateway what it says about the configured credentials. Makes one real HTTP request.';
 
     /**
-     * The configuration namespace this command reads.
-     */
-    private const string CONFIG_KEY = 'ameriabank-vpos';
-
-    /**
      * The operation the probe uses, for the lines that announce and report it.
      *
      * Display text mirroring the client's own request model. Nothing branches
@@ -167,11 +161,45 @@ final class CheckCommand extends Command
      * block at the end, so a run that dies on an unresolvable `back_url` still
      * shows the environment and base URL it got that far with.
      *
-     * The client is resolved inside the try, not injected into this method:
-     * building it is where a blank credential and an out-of-range attempt
-     * budget are refused, and a refusal that happened during method injection
-     * would escape before this command could report it as the configuration
-     * problem it is.
+     * **This method takes no parameters, and resolves what it needs from
+     * `$this->laravel`.** Two reasons, and the second is the one that decided
+     * it.
+     *
+     * The first is the one that was already written here about the client:
+     * everything this method uses is resolved inside the try, because building
+     * it is where a blank credential and an out-of-range attempt budget are
+     * refused, and a refusal that happened during method injection would
+     * escape before this command could report it as the configuration problem
+     * it is. A parameter list is resolved before the first statement runs, so
+     * anything named in it is outside every catch clause below by
+     * construction.
+     *
+     * The second is what an escaping exception carries. The eight statements
+     * above the try can still throw — they write to the output, and an output
+     * whose stream has gone away raises, which `vpos:check | head -1` is enough
+     * to produce. Such a throw escapes with this method's own frame attached,
+     * and with `zend.exception_ignore_args=0` a reporter that walks
+     * `getTrace()` and serialises argument objects reads that frame's
+     * arguments. While this method took the container, the live password was
+     * one hop from a frame this package declares. It no longer takes anything,
+     * so that frame now carries nothing.
+     *
+     * **That narrows the exposure; it does not end it.** Laravel calls this
+     * method through `Container::call()`, and those frames carry both the
+     * container and this command object, from which `getLaravel()` reaches the
+     * same configuration. They belong to the framework and this package cannot
+     * remove them. What is true after this change is the smaller claim: no
+     * frame *this package declares* hands a reporter the configuration.
+     *
+     * Resolving `BackUrlResolver` here rather than taking it is behaviourally
+     * identical for every path that has ever been observed. It is bound with
+     * `bind`, not `singleton` — deliberately, so that it never caches a
+     * configuration repository that has since been replaced — so a fresh
+     * instance per resolution is what the binding is for, and one built at the
+     * BackURL line is the same object one built during method injection would
+     * have been. The refusals it raises come out of `resolve()`, which is
+     * called in the same place as before, so the order in which this command
+     * reports things is unchanged.
      *
      * The success verdict is returned from inside the try as well, so that the
      * environment resolved a few lines above is still in scope for it without
@@ -189,6 +217,18 @@ final class CheckCommand extends Command
      * mode note the operator read several lines and one send earlier — the
      * same reasoning `proven()` gives for restating its ownership premise.
      *
+     * **The try was deliberately not moved up over those eight statements.**
+     * It would not make this method escape-free, which is the only thing that
+     * would have been worth the change: the terminal clause answers with
+     * `unexpected()`, which writes to the output, so an output failure caught
+     * there raises a second time from inside the catch and escapes anyway.
+     * Moving it would also put `$blind` inside the try while every catch clause
+     * reads it, which forces a placeholder assigned above the try and
+     * overwritten inside it — the unobservable value this method already
+     * refuses to introduce for the environment, three paragraphs up. So the
+     * boundary stays where it is, and the exposure was closed by removing what
+     * the escaping frame carries instead.
+     *
      * `unusableOrderId()` is not one of them and takes no mode. It returns
      * above, before any mode note is printed, and names the option in its own
      * message; there is no scrollback for it to depend on.
@@ -204,7 +244,7 @@ final class CheckCommand extends Command
      * the resolver into a named configuration failure like every other
      * `back_url` mistake.
      */
-    public function handle(Application $app, Repository $config, BackUrlResolver $backUrl): int
+    public function handle(): int
     {
         $sentinelOrderId = $this->sentinelOrderId();
         $requestedOrderId = null;
@@ -230,18 +270,18 @@ final class CheckCommand extends Command
         $this->warn(self::NO_RELIABLE_CHECK);
 
         try {
-            $environment = $this->environment($config);
+            $environment = $this->environment();
 
             $this->detail('Environment', $environment->value);
             $this->detail('Base URL', $environment->restBaseUrl());
-            $this->detail('ClientID', $this->masked($config, 'client_id'));
-            $this->detail('Username', $this->masked($config, 'username'));
-            $this->detail('Password', $this->presence($config, 'password'));
-            $this->detail('BackURL', $backUrl->resolve());
+            $this->detail('ClientID', $this->masked('client_id'));
+            $this->detail('Username', $this->masked('username'));
+            $this->detail('Password', $this->presence('password'));
+            $this->detail('BackURL', $this->laravel->make(BackUrlResolver::class)->resolve());
 
             $this->line(sprintf('Sending one %s request for OrderID %d.', self::PROBE_OPERATION, $orderId));
 
-            $app->make(Vpos::class)->payments()->paymentIdForOrder($orderId);
+            $this->laravel->make(Vpos::class)->payments()->paymentIdForOrder($orderId);
 
             return $requestedOrderId === null
                 ? $this->blindSuccess($sentinelOrderId)
@@ -865,14 +905,15 @@ final class CheckCommand extends Command
      *
      * Resolved here as well as in the provider because the base URL is part of
      * what this command reports and the client exposes no way back to the
-     * environment it was built with. Both call sites raise the same named
-     * factory, so there is one message and not two.
+     * environment it was built with. Both call sites read through the same
+     * `ConfigReader` and raise the same named factory, so there is one reading
+     * and one message rather than two of each.
      *
      * @throws ConfigurationException on any value the client does not know
      */
-    private function environment(Repository $config): Environment
+    private function environment(): Environment
     {
-        $value = $this->configString($config, 'environment');
+        $value = $this->packageConfig()->string('environment');
 
         return Environment::tryFrom($value)
             ?? throw ConfigurationException::unknownEnvironment($value);
@@ -890,18 +931,29 @@ final class CheckCommand extends Command
      * output kills those mutants.
      *
      * A non-string value gets a placeholder rather than a refusal. This method
-     * only prints a line, and the run is going to stop a few lines below when
-     * the provider reads the same key and refuses it by name — so throwing
-     * from here would withhold the environment, the base URL and the other
-     * credentials from an operator who is about to be told one of them is the
-     * wrong type. Reporting every line and then failing is the more
-     * informative order, and it is the order the whole command is written in.
+     * only prints a line, and the run is going to stop below — when the
+     * provider reads the same key and refuses it by name, **unless an earlier
+     * line refuses first**. Throwing from here would withhold the environment,
+     * the base URL and the other credentials from an operator who is about to
+     * be told one of them is the wrong type. Reporting every line and then
+     * failing is the more informative order, and it is the order the whole
+     * command is written in.
+     *
+     * The carve-out is real and is what a merchant with two mistakes at once
+     * hits. `handle()` prints ClientID, Username and Password, then resolves
+     * BackURL, and only then builds the client — so a `back_url` that is
+     * blank, unresolvable or parameterised raises from
+     * `BackUrlResolver::resolve()` *between* the placeholder and the refusal
+     * this paragraph points at. The operator then sees the row named as
+     * `(not a string)` and a refusal about a different key, and is never told
+     * which type the first one holds. The placeholder is still the honest
+     * account of the row; it is one refusal short of the whole account.
      */
-    private function masked(Repository $config, string $key): string
+    private function masked(string $key): string
     {
         $visibleCharacters = 4;
 
-        $value = $this->configValue($config, $key);
+        $value = $this->packageConfig()->value($key);
 
         if (! is_string($value)) {
             return $this->absentOrMistyped($value);
@@ -925,9 +977,9 @@ final class CheckCommand extends Command
      * already disclosing: "(set)" and "(not a string)" both say the key holds
      * something, and neither says what.
      */
-    private function presence(Repository $config, string $key): string
+    private function presence(string $key): string
     {
-        $value = $this->configValue($config, $key);
+        $value = $this->packageConfig()->value($key);
 
         if (! is_string($value)) {
             return $this->absentOrMistyped($value);
@@ -948,7 +1000,10 @@ final class CheckCommand extends Command
      * The value is read for nothing but which of those two it is. Its type is
      * not printed here either — the refusal the provider raises a moment later
      * names the key and the type together, in one place, where the sentence
-     * has room to say what to do about it.
+     * has room to say what to do about it. That refusal arrives on the
+     * ordinary path and is not guaranteed: `masked()`'s docblock records the
+     * case where `BackUrlResolver::resolve()` refuses first and the type is
+     * never named.
      */
     private function absentOrMistyped(mixed $value): string
     {
@@ -956,58 +1011,35 @@ final class CheckCommand extends Command
     }
 
     /**
-     * A package configuration value as a string, or a refusal naming its type.
+     * A reader over the configuration repository the container holds *now*.
      *
-     * **This must read the key exactly as the service provider reads it.** The
-     * provider is what builds the client, so a key this command accepted and
-     * the provider refused — or the reverse — would print one account of the
-     * configuration and act on another.
+     * **This command must read a key exactly as the service provider reads
+     * it.** The provider is what builds the client, so a key this command
+     * accepted and the provider refused — or the reverse — would print one
+     * account of the configuration and act on another, and the two accounts
+     * would arrive in the same run: `Environment: ` printed from a blank
+     * reading, then a refusal from the provider four lines later.
      *
-     * `null` reads as blank, because a missing key and an unset environment
-     * variable both arrive that way and blank is refused by whichever
-     * component was asked for it, in that component's own words. Anything else
-     * is set to the wrong type and is refused here, by a factory that names the
-     * key and the type and never the value.
+     * That used to be a requirement stated in prose, held up by this command
+     * carrying an eight-line reader byte-identical to the provider's. It is
+     * now a requirement held by there being one reader. `ConfigReader` carries
+     * the reasoning for how a value is coerced, and why the configured value
+     * never crosses into an exception factory.
      *
-     * The type is resolved at this throw site and the value is handed on
-     * nowhere. A factory taking the value would make it frame 0's argument in
-     * the trace the refusal carries, and `getTraceAsString()` renders those
-     * verbatim into any log that records the exception — which for three of
-     * these keys is a credential. `ConfigurationException::notAString()` sets
-     * the reasoning out in full.
+     * A fresh reader per read rather than one held on the command. An artisan
+     * command instance is cached by the console application and can run more
+     * than once in a process — a test calling `artisan('vpos:check')` twice
+     * with different configuration between the calls does exactly that — so a
+     * reader stored here would report the configuration of the earlier run.
      *
-     * `masked()` and `presence()` deliberately do not route through this: they
-     * print a line for a value they have been told to describe rather than to
-     * use, and their placeholder is the description.
-     *
-     * @throws ConfigurationException when the key is set to something other than a string
+     * `masked()` and `presence()` read through `value()` rather than
+     * `string()` deliberately: they print a line for a value they have been
+     * told to describe rather than to use, and their placeholder is the
+     * description.
      */
-    private function configString(Repository $config, string $key): string
+    private function packageConfig(): ConfigReader
     {
-        $value = $this->configValue($config, $key);
-
-        if ($value === null) {
-            return '';
-        }
-
-        if (is_string($value)) {
-            return $value;
-        }
-
-        throw ConfigurationException::notAString($key, get_debug_type($value));
-    }
-
-    /**
-     * A package configuration value, untouched.
-     *
-     * One place composes the key, so the namespace prefix is written once and
-     * every reader above sees exactly what the repository holds — including
-     * whether it holds `null`, which is the distinction `absentOrMistyped()`
-     * turns into a line and `configString()` turns into a refusal.
-     */
-    private function configValue(Repository $config, string $key): mixed
-    {
-        return $config->get(self::CONFIG_KEY.'.'.$key);
+        return new ConfigReader($this->laravel->make(Repository::class));
     }
 
     /**
