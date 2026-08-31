@@ -29,7 +29,8 @@ use function sprintf;
  * PHP — a missing PSR-18 implementation, a blank credential. This one covers a
  * Laravel application configured wrongly: an environment name the client does
  * not know, a `back_url` naming a route that does not exist, a callback asked
- * for outside the request that would carry it.
+ * for outside the request that would carry it, a key set to the wrong type, an
+ * attempt budget outside the range the client accepts.
  *
  * It implements the core's VposExceptionInterface all the same, so one
  * `catch (VposExceptionInterface $e)` around a payment flow still catches
@@ -176,6 +177,178 @@ final class ConfigurationException extends LogicException implements VposExcepti
         );
     }
 
+    /**
+     * A configured value is set, and is set to something that is not a string.
+     *
+     * Distinct from a value being absent, and that distinction is the whole
+     * point of this factory. A missing key and an unset environment variable
+     * both arrive as `null` and are read as blank, which the component asked
+     * for the value refuses in its own words — *"Credential field ClientID
+     * must not be blank"* — and that refusal is correct, because the value
+     * really is not there. Reading a wrong-typed value as blank sends the same
+     * refusal for a value that **is** there, and an operator told a key is
+     * missing goes looking for a missing one.
+     *
+     * Refused rather than cast. A cast turns a misconfigured value into a
+     * silently different one, and for a credential a silently different one is
+     * a credential the gateway will reject without saying which field was
+     * wrong.
+     *
+     * **Only the type is named, and the value never crosses into this class.**
+     * Every key that reaches here is read out of the package's own
+     * configuration namespace, and three of them hold credentials, so the
+     * value cannot be repeated, cannot be truncated, and cannot be described by
+     * anything derived from it. `get_debug_type()` names the type and nothing
+     * else — it returns `int`, `bool`, `array`, `float` or a class name, none
+     * of which is a function of the value.
+     *
+     * **The caller resolves the type; this factory is handed the name.** A
+     * factory taking the value would keep it out of the message and put it into
+     * the trace: the exception is constructed inside this method, so this
+     * method's own call becomes frame 0 of `getTrace()`, its arguments become
+     * `args`, and `getTraceAsString()` renders them verbatim. Laravel's default
+     * log formatter includes stack traces, so a reported exception would write
+     * a credential into the application's log — the one place the rest of this
+     * class is written to keep it out of. Narrowing the parameter to `string`
+     * removes the value from the boundary rather than filtering it afterwards,
+     * and it is the half of that defence `__serialize()` cannot supply, since
+     * `__serialize()` never runs for an exception that is merely logged.
+     *
+     * No environment variable is named here, unlike most factories on this
+     * class. The mapping from a configuration key to the variable behind it is
+     * not derivable — `logging.channel` is read from `AMERIABANK_VPOS_LOG_CHANNEL`
+     * and `logging.enabled` from `AMERIABANK_VPOS_LOGGING` — so a name composed
+     * from the key would be right for the credentials and wrong for the
+     * logging keys, in a message whose whole purpose is to stop sending the
+     * operator to the wrong place.
+     *
+     * @param  string  $key  The configuration key, relative to the package namespace. Never a value.
+     * @param  string  $type  The configured value's type, from `get_debug_type()` at the throw site. Never a value.
+     */
+    public static function notAString(string $key, string $type): self
+    {
+        return new self(sprintf(
+            'ameriabank-vpos.%s must be a string, and the configured value is of type %s. It is not missing — '
+            .'it is set to the wrong type, and this package refuses it rather than casting it, because a cast '
+            .'would turn a misconfigured value into a silently different one. Neither the value nor any part of '
+            .'it is repeated here, because these keys can hold credentials. Correct the type in '
+            .'config/ameriabank-vpos.php, or in the environment variable that key reads.',
+            $key,
+            $type,
+        ));
+    }
+
+    /**
+     * `max_attempts` is not an integer, or is an integer outside the client's
+     * accepted range.
+     *
+     * Checked on this side of the bridge rather than left to the client. The
+     * client refuses the same value — its transport raises a
+     * `ValidationException` from its constructor — but it refuses a *number*,
+     * having no idea where that number came from, so its message can name
+     * neither the configuration key nor the environment variable behind it.
+     * This value comes from `ameriabank-vpos.max_attempts` and from nowhere
+     * else, so this package can say exactly what to change, and does.
+     *
+     * A non-integer is reported as its type rather than as the `0` a cast
+     * would produce. `(int) 'three'` is `0` and `(int) '3.9'` is `3`: the first
+     * names a budget nobody configured and the second silently runs a
+     * different one.
+     *
+     * **The bounds are parameters, not literals in this message.** The check
+     * that rejects the value and the sentence that explains the rejection have
+     * to agree, and the only way to guarantee that is for both to read the same
+     * two numbers. They belong to the caller because the caller is what
+     * compares against them.
+     *
+     * The configured value itself is not interpolated, for the reason
+     * `notAString()` gives: the operator already has it, and this package does
+     * not echo configuration back into a message it did not have to.
+     *
+     * **The value does not reach this method either**, for the reason
+     * `notAString()` gives at greater length: a factory's own parameters become
+     * frame 0's `args` in the trace the exception it builds carries, and that
+     * trace is logged. `max_attempts` is not a credential, so this one is
+     * consistency rather than exposure — but a factory that accepts the value
+     * is where a credential gets routed next, and the type name is all this
+     * sentence ever needed.
+     *
+     * Which of the two faults occurred is therefore decided from the type name
+     * rather than from the value: `get_debug_type()` returns `int` for exactly
+     * the values `is_int()` accepts, so an `int` arriving here is one the
+     * caller compared against the bounds and rejected.
+     *
+     * @param  string  $type  The configured value's type, from `get_debug_type()` at the throw site. Never a value.
+     * @param  int  $lowestBudget  The smallest accepted attempt count, from the caller that enforces it.
+     * @param  int  $highestBudget  The largest accepted attempt count, from the same caller.
+     */
+    public static function invalidMaxAttempts(string $type, int $lowestBudget, int $highestBudget): self
+    {
+        $fault = $type === 'int'
+            ? 'the configured value is outside that range'
+            : sprintf(
+                'the configured value is of type %s, which this package refuses rather than casting, because a '
+                .'cast would run an attempt budget nobody configured',
+                $type,
+            );
+
+        return new self(sprintf(
+            'ameriabank-vpos.max_attempts (AMERIABANK_VPOS_MAX_ATTEMPTS) must be an integer between %d and %d, '
+            .'and %s. The value itself is not repeated here. This is the total number of attempts a retryable '
+            .'operation gets; which operations may be retried at all is fixed by the client and is not '
+            .'configurable.',
+            $lowestBudget,
+            $highestBudget,
+            $fault,
+        ));
+    }
+
+    /**
+     * The package-scoped HTTP client key is bound to something that is not a
+     * PSR-18 client.
+     *
+     * This key exists so that an application can name the client the vPOS
+     * credential payload goes through, distinctly from the application-wide
+     * `Psr\Http\Client\ClientInterface` binding that every other package sees.
+     * Something bound there is therefore a deliberate instruction, and the
+     * quiet answer — ignore it, fall back to the shared binding — would send
+     * the payment traffic to exactly the client the application went out of its
+     * way to say it did not want. It is refused instead, at the first
+     * resolution, in the application's own service provider's words.
+     *
+     * The key is a parameter rather than a literal here for the reason
+     * `invalidMaxAttempts()` gives about its bounds: the code that reads the
+     * key and the sentence that names it have to agree, and they agree by
+     * reading the same constant.
+     *
+     * Only the type is named, by `get_debug_type()` at the throw site. Nothing
+     * bound to a container key is assumed safe to print — a closure's return, a
+     * misconfigured factory or a string holding a token are all things that
+     * could arrive here.
+     *
+     * **Nor safe to accept.** Printing is not the only way a value escapes: a
+     * factory taking the bound object would make it frame 0's argument in the
+     * trace the refusal carries, and that trace is logged. So the type is
+     * resolved by the caller and the object stays there, for the reason
+     * `notAString()` sets out.
+     *
+     * @param  string  $key  The container key that was read. Never a value.
+     * @param  string  $type  The bound value's type, from `get_debug_type()` at the throw site. Never a value.
+     */
+    public static function httpClientNotPsr18(string $key, string $type): self
+    {
+        return new self(sprintf(
+            'The container key %s is bound to a value of type %s, which does not implement '
+            .'Psr\Http\Client\ClientInterface. That key is where this package looks for the PSR-18 client to '
+            .'send Ameriabank vPOS traffic through, so it is refused rather than ignored: falling back to the '
+            .'application-wide Psr\Http\Client\ClientInterface binding would send payment traffic through a '
+            .'client this application asked it not to use. Bind a PSR-18 client there, or unbind the key and '
+            .'let the application-wide binding or the client\'s own discovery choose.',
+            $key,
+            $type,
+        ));
+    }
+
     public function chainDropped(): ?bool
     {
         return $this->chainDropped;
@@ -206,6 +379,23 @@ final class ConfigurationException extends LogicException implements VposExcepti
      * built at the *restore* site, arguments and all. Sending the narrowed trace
      * is what lets `__unserialize()` overwrite that, so the omission was the
      * leak and the entry is the fix.
+     *
+     * **This covers one of the two paths a trace leaves by, and the other one
+     * is not defended here.** `__serialize()` runs when an exception is queued,
+     * cached or otherwise persisted. It does not run when one is merely
+     * *logged*: Laravel's default log formatter reads `getTraceAsString()` off
+     * the live object, and `getTrace()` on a live object still carries every
+     * frame's `args`, this filter notwithstanding. What keeps a credential out
+     * of that trace is which arguments the factories above accept: every
+     * factory a credential-bearing key can reach takes the type name its caller
+     * resolved and never the value, so no credential is an argument to a frame
+     * this class builds. The factories that do take a configured value verbatim
+     * are handed `environment` or `back_url`; neither is a credential, and each
+     * of those factories interpolates the value it was given into the message
+     * it builds, so a configured value in one of those frames' arguments is one
+     * the exception's own message already prints. Neither half is sufficient
+     * alone, and a reader who finds only this one will conclude the other is
+     * unnecessary: it is not.
      *
      * `previous` is dropped for the same reason the core drops it, and that it
      * was dropped is recorded rather than silently lost.

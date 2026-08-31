@@ -887,22 +887,58 @@ it('refuses an unknown environment before it sends anything', function (?string 
     expect($result['exit'])->toBe(1)
         ->and($stub->requests())->toBe([])
         ->and($result['output'])
-        ->toContain('The Ameriabank vPOS configuration is not usable. Unknown Ameriabank vPOS environment '
-            .'"staging". Set ameriabank-vpos.environment (AMERIABANK_VPOS_ENVIRONMENT) to one of: test, production.')
+        ->toContain('Ameriabank vPOS is not set up correctly, and this run stopped without reaching a verdict '
+            .'on the credentials. Unknown Ameriabank vPOS environment "staging". Set '
+            .'ameriabank-vpos.environment (AMERIABANK_VPOS_ENVIRONMENT) to one of: test, production.')
         ->and($result['output'])->not->toContain('Environment: ');
 
     expectNoCredentialLeak($result['output']);
 })->with('both modes');
 
+/*
+ * The environment nobody configured, which is a different mistake again.
+ *
+ * `null` is what a missing key and an unset environment variable both arrive
+ * as, and it really is absent — so it is read as blank and refused by the
+ * factory that names the accepted values, not by the one that names a type.
+ * The wrong-type refusal is asserted absent to keep the two apart: a value that
+ * is not there has no type to report, and reporting one would send the operator
+ * looking for a value to correct rather than a value to write.
+ */
+it('refuses an environment that was never configured, reading it as blank', function (): void {
+    vposConfig(['ameriabank-vpos.environment' => null]);
+
+    $stub = StubHttpClient::answering(200, SUCCESS_BODY);
+    $result = runCheck($stub);
+
+    expect($result['exit'])->toBe(1)
+        ->and($stub->requests())->toBe([])
+        ->and($result['output'])
+        ->toContain('Ameriabank vPOS is not set up correctly, and this run stopped without reaching a verdict '
+            .'on the credentials. Unknown Ameriabank vPOS environment "". Set ameriabank-vpos.environment '
+            .'(AMERIABANK_VPOS_ENVIRONMENT) to one of: test, production.')
+        ->and($result['output'])->not->toContain('must be a string, and the configured value is of type');
+
+    expectNoCredentialLeak($result['output']);
+});
+
 it('refuses a blank credential before it sends anything, and names the field', function (?string $orderIdOption, int $orderId): void {
     /*
-     * Two of the three are absent rather than empty, which is what an
-     * application that never set the environment variables actually has: the
-     * config file's env() call yields null, and the command has to read that as
-     * "not set" rather than printing whatever a non-string coerces to.
+     * Three keys, three different routes to the same "(not set)".
+     *
+     * `client_id` is the empty string — a variable that is set and empty, which
+     * is what a `.env` line with nothing after the `=` produces. `username` is
+     * absent, which is what an application that never wrote the line has: the
+     * config file's `env()` call yields null. `password` is empty as well, and
+     * goes through `presence()` rather than `masked()`.
+     *
+     * They are deliberately not all the same shape. Absent and empty arrive at
+     * the placeholder by different branches — one through the null reading and
+     * one through the blank one — and a fixture using only null would leave the
+     * blank branch printing whatever it liked.
      */
     vposConfig([
-        'ameriabank-vpos.client_id' => null,
+        'ameriabank-vpos.client_id' => '',
         'ameriabank-vpos.username' => null,
         'ameriabank-vpos.password' => '',
     ]);
@@ -916,7 +952,8 @@ it('refuses a blank credential before it sends anything, and names the field', f
         ->toContain('ClientID: (not set)')
         ->toContain('Username: (not set)')
         ->toContain('Password: (not set)')
-        ->toContain('The Ameriabank vPOS configuration is not usable. Credential field "ClientID" must not be blank.');
+        ->toContain('Ameriabank vPOS is not set up correctly, and this run stopped without reaching a verdict '
+            .'on the credentials. Credential field "ClientID" must not be blank.');
 })->with('both modes');
 
 /*
@@ -933,8 +970,28 @@ it('refuses a blank credential before it sends anything, and names the field', f
  * These are configuration mistakes an application really makes: an all-digit
  * ClientID unquoted in a .env-driven cast, or a value a merchant set to true
  * meaning "enabled".
+ *
+ * ## What changed, and why "(not set)" is now asserted absent
+ *
+ * These three lines used to print "(not set)", which was the *cast* answer
+ * wearing the absent one's clothes: the value is there, the operator wrote it
+ * down, and the command sent them to look for a missing one. Each line now
+ * says the key holds something of the wrong type and says nothing else about
+ * it — "(not a string)" and "(set)" disclose exactly the same amount, which is
+ * that the key is not empty.
+ *
+ * "(not set)" is therefore asserted **absent from the whole run**. It is the
+ * one assertion here that would still pass if the distinction were dropped
+ * again, so it is the one that holds the change: the fixture sets all three
+ * keys, so a run printing "(not set)" anywhere has lost it. The configured
+ * values stay asserted absent for the reason they always were.
+ *
+ * The refusal is the provider's, not the client's, and it names the key and
+ * the type. The client's blank-credential refusal is asserted absent with it:
+ * reaching that message again would mean a wrong-typed value had been read as
+ * an empty one somewhere upstream.
  */
-it('reads a non-string credential as absent rather than as whatever it coerces to', function (): void {
+it('reports a non-string credential as the wrong type it is, never as absent', function (): void {
     vposConfig([
         'ameriabank-vpos.client_id' => 12345678,
         'ameriabank-vpos.username' => 4.5,
@@ -947,13 +1004,59 @@ it('reads a non-string credential as absent rather than as whatever it coerces t
     expect($result['exit'])->toBe(1)
         ->and($stub->requests())->toBe([])
         ->and($result['output'])
-        ->toContain('ClientID: (not set)')
-        ->toContain('Username: (not set)')
-        ->toContain('Password: (not set)')
-        ->toContain('The Ameriabank vPOS configuration is not usable. Credential field "ClientID" must not be blank.')
+        ->toContain('ClientID: (not a string)')
+        ->toContain('Username: (not a string)')
+        ->toContain('Password: (not a string)')
+        ->toContain('Ameriabank vPOS is not set up correctly, and this run stopped without reaching a verdict '
+            .'on the credentials. ameriabank-vpos.client_id must be a '
+            .'string, and the configured value is of type int. It is not missing — it is set to the wrong type, '
+            .'and this package refuses it rather than casting it, because a cast would turn a misconfigured '
+            .'value into a silently different one. Neither the value nor any part of it is repeated here, '
+            .'because these keys can hold credentials. Correct the type in config/ameriabank-vpos.php, or in '
+            .'the environment variable that key reads.')
+        ->and($result['output'])->not->toContain('(not set)')
         ->and($result['output'])->not->toContain('1234')
         ->and($result['output'])->not->toContain('4.5')
-        ->and($result['output'])->not->toContain('(set)');
+        ->and($result['output'])->not->toContain('must not be blank');
+
+    expectNoCredentialLeak($result['output']);
+});
+
+/*
+ * The same mistake on the one key that is not a credential, which is the only
+ * place the command's own refusal can be observed.
+ *
+ * `CheckCommand::configString()` is read by `environment()` and by nothing
+ * else: the three credential lines go through `masked()` and `presence()`,
+ * which describe a value rather than use one and so print a placeholder. So
+ * this is the run where the *command* raises the wrong-type refusal rather
+ * than the provider, and it happens before a single detail line is printed.
+ *
+ * The old reading is asserted absent. `configString()` used to answer '' for
+ * anything that was not a string, so a numeric environment reached
+ * `Environment::tryFrom('')` and produced a refusal about a blank environment
+ * nobody had configured — the exact sentence a regression would print again.
+ */
+it('refuses an environment set to the wrong type before it prints anything about it', function (): void {
+    vposConfig(['ameriabank-vpos.environment' => 42]);
+
+    $stub = StubHttpClient::answering(200, SUCCESS_BODY);
+    $result = runCheck($stub);
+
+    expect($result['exit'])->toBe(1)
+        ->and($stub->requests())->toBe([])
+        ->and($result['output'])
+        ->toContain('Ameriabank vPOS is not set up correctly, and this run stopped without reaching a verdict '
+            .'on the credentials. ameriabank-vpos.environment must be a '
+            .'string, and the configured value is of type int. It is not missing — it is set to the wrong type, '
+            .'and this package refuses it rather than casting it, because a cast would turn a misconfigured '
+            .'value into a silently different one. Neither the value nor any part of it is repeated here, '
+            .'because these keys can hold credentials. Correct the type in config/ameriabank-vpos.php, or in '
+            .'the environment variable that key reads.')
+        ->and($result['output'])->not->toContain('Environment: ')
+        ->and($result['output'])->not->toContain('Unknown Ameriabank vPOS environment ""');
+
+    expectNoCredentialLeak($result['output']);
 });
 
 it('refuses an unresolvable back_url before it sends anything', function (): void {
@@ -968,9 +1071,10 @@ it('refuses an unresolvable back_url before it sends anything', function (): voi
         ->and($result['output'])
         ->toContain('Password: (set)')
         ->and($result['output'])->not->toContain('BackURL: ')
-        ->and($result['output'])->toContain('The Ameriabank vPOS configuration is not usable. ameriabank-vpos.back_url is '
-            .'"checkout.vpos.bakc", which is neither an absolute http or https URL nor the name of a registered '
-            .'route. Name a route, or configure a full URL.');
+        ->and($result['output'])->toContain('Ameriabank vPOS is not set up correctly, and this run stopped '
+            .'without reaching a verdict on the credentials. ameriabank-vpos.back_url is "checkout.vpos.bakc", '
+            .'which is neither an absolute http or https URL nor the name of a registered route. Name a route, '
+            .'or configure a full URL.');
 
     /*
      * A configuration refusal carries no blind pointer, and this run is blind.
@@ -1049,7 +1153,8 @@ it('names a back_url route that needs parameters as the configuration mistake it
         ->and($result['output'])->not->toContain('BackURL: ')
         ->and($result['output'])->not->toContain('Sending one GetPaymentId request')
         ->and($result['output'])->toContain(sprintf(
-            'The Ameriabank vPOS configuration is not usable. %s',
+            'Ameriabank vPOS is not set up correctly, and this run stopped without reaching a verdict on the '
+            .'credentials. %s',
             ConfigurationException::parameterisedBackUrlRoute(
                 'checkout.vpos.back',
                 new RuntimeException('the cause, which is not printed'),
@@ -1064,23 +1169,31 @@ it('names a back_url route that needs parameters as the configuration mistake it
 });
 
 /*
- * The core's ValidationException, arriving the one way a real run can produce
- * it: the provider hands the client the configured attempt budget and the
- * client refuses that number.
+ * ---------------------------------------------------------------------------
+ * The attempt budget, now refused on this side of the bridge.
  *
- * This is the branch that names the key and the environment variable, and the
- * command reaches it by rebuilding ValidationException::maxAttemptsOutOfRange()
- * from the configured value and finding the two messages identical. So the
- * expected string is built from the client's own factory here as well. A
- * hand-copied one would keep passing if the command started comparing against a
- * literal of its own that had drifted from the client's wording — the command
- * would print its literal and the test would confirm its copy of it, with the
- * client saying something else entirely.
+ * It used to reach the client, which range-checks it in HttpTransport's
+ * constructor and raises its own ValidationException. That refusal names a
+ * number and nothing else — the client has no idea where the number came from
+ * — so this command recognised it by rebuilding the client's message from the
+ * configured value and then printed a sentence naming the key. Correct, and
+ * held up by a message string owned by a separately versioned package.
  *
- * The refusal of a value this configuration did not ask for is the other side
- * of that comparison, and it cannot be provoked from configuration at all: it
- * is asserted through the PSR-18 seam in CheckCommandExceptionCoverageTest.
+ * `AmeriabankVposServiceProvider::maxAttempts()` refuses the value at the
+ * `maxAttempts:` argument position of `new Vpos(...)`, which PHP evaluates
+ * before entering the constructor. No Vpos and no HttpTransport exists when
+ * the refusal is raised, so the client's exception is not pre-empted — it is
+ * unreachable for this cause — and the refusal arrives at handle()'s
+ * ClientConfigurationException|ConfigurationException clause like every other
+ * configuration mistake.
+ *
+ * Both tests assert the client's own message for the same value **absent**,
+ * built from the client's factory rather than quoted. That is the acceptance
+ * criterion in the output: a run in which the client had refused the budget
+ * would carry it.
+ * ---------------------------------------------------------------------------
  */
+
 it('refuses an out-of-range max_attempts and names the configuration key', function (?string $orderIdOption, int $orderId): void {
     $configured = 9;
 
@@ -1092,22 +1205,22 @@ it('refuses an out-of-range max_attempts and names the configuration key', funct
     expect($result['exit'])->toBe(1)
         ->and($stub->requests())->toBe([])
         ->and($result['output'])
-        ->toContain(sprintf(
-            'The Ameriabank vPOS configuration is not usable. ameriabank-vpos.max_attempts '
-            .'(AMERIABANK_VPOS_MAX_ATTEMPTS) reached the client as %d, and the client refused it. %s',
-            $configured,
-            ValidationException::maxAttemptsOutOfRange($configured)->getMessage(),
-        ));
+        ->toContain('Ameriabank vPOS is not set up correctly, and this run stopped without reaching a verdict '
+            .'on the credentials. ameriabank-vpos.max_attempts (AMERIABANK_VPOS_MAX_ATTEMPTS) must be an '
+            .'integer between 1 and 5, and the configured value is '
+            .'outside that range. The value itself is not repeated here. This is the total number of attempts a '
+            .'retryable operation gets; which operations may be retried at all is fixed by the client and is '
+            .'not configurable.')
+        ->and($result['output'])
+        ->not->toContain(ValidationException::maxAttemptsOutOfRange($configured)->getMessage());
 
     /*
-     * The named refusal carries no blind pointer either, and the blind case of
-     * this dataset is the one that could carry it.
+     * The refusal carries no blind pointer, and the blind case of this dataset
+     * is the one that could carry it.
      *
-     * The client refused a number this configuration handed it before anything
-     * reached the wire in this run, so the mode changed nothing about the
-     * outcome and re-running with --order-id would produce the identical
-     * refusal. The generic half of the same branch is pinned in
-     * CheckCommandExceptionCoverageTest, which is the only place it can be.
+     * `pointBlindRunAtOrderId()` excludes the configuration refusals: nothing
+     * was sent, so there is no reply a second run in the other mode would have
+     * improved on, and the identical refusal would arrive again.
      */
     expect($result['output'])->not->toContain(blindPointer());
 
@@ -1115,19 +1228,22 @@ it('refuses an out-of-range max_attempts and names the configuration key', funct
 })->with('both modes');
 
 /*
- * A non-integer max_attempts reaches the client as 0, and 0 is what the message
- * must report: the configured text is not echoed back, because what decides the
- * refusal is the value the client was actually handed.
+ * A non-integer budget reports the type it was configured as.
  *
- * It is also what pins the command's reading of the key to the provider's. The
- * two compute the same 0 from the same non-integer, and the named branch is
- * reached only because they agree; a command that read this key differently
- * from the provider would rebuild the refusal from a different number, match
- * nothing, and fall to the generic message this asserts against.
+ * It used to report `0` — the number `configInt()` produced for anything that
+ * was not an integer, and a budget nobody had configured. `(int) 'three'` is 0
+ * and `(int) '3.9'` is 3: the first names a value out of thin air and the
+ * second would have silently run a different one. The configured text itself
+ * is still not echoed back, so `three` is asserted absent alongside the `0`.
+ *
+ * The `0` is asserted through the **client's own factory**, built with it. The
+ * literal that sat beside it — *"reached the client as 0"* — was a fragment of
+ * `attemptBudgetRefused()`, the named branch task 005 deleted, and it has been
+ * removed rather than kept: no code can emit those words again, so it could
+ * never have failed. `maxAttemptsOutOfRange(0)` is the same claim made against
+ * a message that still exists, and it is derived rather than quoted.
  */
-it('reports a non-integer max_attempts as the zero the client was handed', function (): void {
-    $handedToTheClient = 0;
-
+it('reports a non-integer max_attempts as the type it was configured as', function (): void {
     vposConfig(['ameriabank-vpos.max_attempts' => 'three']);
 
     $stub = StubHttpClient::answering(200, SUCCESS_BODY);
@@ -1136,14 +1252,16 @@ it('reports a non-integer max_attempts as the zero the client was handed', funct
     expect($result['exit'])->toBe(1)
         ->and($stub->requests())->toBe([])
         ->and($result['output'])
-        ->toContain(sprintf(
-            'ameriabank-vpos.max_attempts (AMERIABANK_VPOS_MAX_ATTEMPTS) reached the client as %d, and the '
-            .'client refused it. %s',
-            $handedToTheClient,
-            ValidationException::maxAttemptsOutOfRange($handedToTheClient)->getMessage(),
-        ))
+        ->toContain('Ameriabank vPOS is not set up correctly, and this run stopped without reaching a verdict '
+            .'on the credentials. ameriabank-vpos.max_attempts (AMERIABANK_VPOS_MAX_ATTEMPTS) must be an '
+            .'integer between 1 and 5, and the configured value is of '
+            .'type string, which this package refuses rather than casting, because a cast would run an attempt '
+            .'budget nobody configured. The value itself is not repeated here. This is the total number of '
+            .'attempts a retryable operation gets; which operations may be retried at all is fixed by the '
+            .'client and is not configurable.')
         ->and($result['output'])->not->toContain('three')
-        ->and($result['output'])->not->toContain('The client raised a validation refusal');
+        ->and($result['output'])->not->toContain(ValidationException::maxAttemptsOutOfRange(0)->getMessage())
+        ->and($result['output'])->not->toContain('The Ameriabank vPOS client refused an input');
 });
 
 /*
@@ -1244,36 +1362,37 @@ it('reproduces a --order-id carrying console markup literally instead of interpr
 /*
  * The premise underneath the max_attempts message, pinned where it can break.
  *
- * Every core ValidationException reaching the command is reported as a problem
- * with ameriabank-vpos.max_attempts, on the reasoning that the attempt budget is
- * the only configured value this exchange hands the client that the client
- * range-checks. That reasoning is about a separate package on its own release
- * cycle, and it is held by nothing but having read the client's call sites once.
+ * The premise is that the blind probe reaches the wire, and it is a premise
+ * about a separately versioned package: the client's OrderID carries no range
+ * check today, and nothing but having read its call sites once holds that.
  *
  * The value most likely to falsify it is this command's own sentinel. It is
- * negative and nine digits precisely so that no merchant could own it, and the
- * client's OrderID carries no range check today. If the client ever adds one, a
- * `composer update` turns the blind probe into a run that refuses itself before
- * the wire and then tells the merchant to go and look at an environment
- * variable that had nothing to do with it — first sentence wrong, and it is the
- * sentence an operator acts on.
+ * negative and nine digits precisely so that no merchant could own it. If the
+ * client ever range-checks OrderID, a `composer update` turns the blind probe
+ * into a run that refuses itself before the wire — and the refusal arrives as a
+ * `ValidationException` about a value the merchant never configured, printed by
+ * a branch that can say nothing about where it came from.
  *
- * This guard is that moment's alarm: the blind probe must reach the wire
- * carrying the sentinel, and no blind run may name the attempt-budget key. It
- * pins the premise rather than the branch, because the branch does not exist —
- * see the note this file's max_attempts tests carry.
+ * This guard is that moment's alarm, and it survives task 005's move of the
+ * attempt budget to the bridge unchanged. What it pins is unchanged too: the
+ * blind probe must reach the wire carrying the sentinel, and no blind run may
+ * name the attempt-budget environment variable. The second half was written
+ * when there was a branch that could name it; it is kept because it is now the
+ * standing statement that **no** validation refusal names a key, asserted from
+ * the one run that sends something.
  */
 it('keeps the sentinel OrderID one the client will actually send, so no refusal of it can be mislabelled', function (): void {
     $stub = StubHttpClient::answering(200, SUCCESS_BODY);
 
     $result = runCheck($stub);
 
-    expect(count($stub->requests()))->toBe(1, 'The blind probe never reached the wire. If the client now refuses '
-        .'the sentinel OrderID -999999999, vpos:check reports that refusal as a problem with '
-        .'ameriabank-vpos.max_attempts, which is the one ValidationException it assumes it can receive. Make '
-        .'attemptBudgetRefused() compare the exception against ValidationException::maxAttemptsOutOfRange() with '
-        .'the configured value, and give anything unmatched a generic refusal that still exits 1 and still '
-        .'prints the client\'s own words.')
+    expect(count($stub->requests()))->toBe(1, 'The blind probe never reached the wire. The likeliest cause is '
+        .'that the client now range-checks OrderID and refused the sentinel -999999999, in which case every '
+        .'blind run raises a ValidationException before sending and vpos:check reports it through the generic '
+        .'refusal — honest, but it says nothing an operator can act on and it exits 1, which in this command '
+        .'means the credentials were proven wrong. Choose a sentinel the client will send, or give the refusal '
+        .'of the sentinel a named branch of its own that says the probe could not be made rather than that the '
+        .'configuration is at fault.')
         ->and($stub->requests()[0]->getBody()->__toString())->toContain('"OrderID":'.SENTINEL_ORDER_ID)
         ->and($result['output'])->not->toContain('AMERIABANK_VPOS_MAX_ATTEMPTS');
 });

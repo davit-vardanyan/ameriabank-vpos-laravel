@@ -25,7 +25,7 @@ use Illuminate\Contracts\Foundation\Application;
 use Throwable;
 
 use function filter_var;
-use function is_int;
+use function get_debug_type;
 use function is_string;
 use function sprintf;
 use function str_replace;
@@ -129,6 +129,17 @@ final class CheckCommand extends Command
     private const string TRUNCATED = '...';
 
     private const string NOT_SET = '(not set)';
+
+    /**
+     * Printed for a key that is configured, and configured to the wrong type.
+     *
+     * Distinct from NOT_SET, and the distinction is the whole of what this
+     * line can safely say. An operator reading "(not set)" over a key they
+     * filled in goes looking for a missing value; one reading this goes
+     * looking for a quoted one. Neither the value nor its length nor any
+     * character of it is disclosed by either.
+     */
+    private const string NOT_A_STRING = '(not a string)';
 
     private const string SET = '(set)';
 
@@ -248,7 +259,7 @@ final class CheckCommand extends Command
         } catch (ClientConfigurationException|ConfigurationException $failure) {
             return $this->misconfigured($failure->getMessage());
         } catch (ValidationException $failure) {
-            return $this->attemptBudgetRefused($config, $failure->getMessage());
+            return $this->configuredValueRefused($failure->getMessage());
         } catch (Throwable $failure) {
             return $this->unexpected($failure::class, $blind);
         }
@@ -637,11 +648,46 @@ final class CheckCommand extends Command
     }
 
     /**
-     * The request was never built, because the configuration would not resolve.
+     * Either package raised its own named configuration refusal.
+     *
+     * **The preamble says what the catch establishes, and no more.** It used to
+     * open *"The Ameriabank vPOS configuration is not usable."*, which is true
+     * of most of what lands here and false of one case: `httpClientNotPsr18()`
+     * is raised for a **container binding**, and this package's README says of
+     * that key that it is *"a container key, not a configuration key … not read
+     * from `config/ameriabank-vpos.php` and does not appear there"*. The old
+     * sentence therefore sent the operator to a file the offending value cannot
+     * be in — the same shape as the claim `configuredValueRefused()` withdrew,
+     * and against the same rule. *"Not set up correctly"* covers a setting, a
+     * container binding and an environment variable without asserting which,
+     * and the message that follows names it.
+     *
+     * **It does not say that nothing was sent, and that omission is deliberate.**
+     * The obvious replacement — *"the client could not be built, so no request
+     * was sent"* — is not established by this catch. The client's own
+     * `ConfigurationException` is reachable **after** a send: `ResponseCode`
+     * raises `successCodeHasNoException()` while reading a reply, and
+     * `HttpTransport` raises `requestRejectedByClient()` out of a PSR-18
+     * client's own failure. Every route reachable today may well precede the
+     * send, but that is a reading of one version of a separately versioned
+     * package, and *"nothing was sent"* printed over a run that sent something
+     * is the stronger and more damaging error — `configuredValueRefused()`
+     * records the same reasoning at greater length.
+     *
+     * **The preamble is not branched by factory either.** The message that
+     * follows is written by the factory, which knows whether it is naming a
+     * configuration key or a container key and says so; a preamble that guessed
+     * would be a second, less-informed account of the same failure. Branching
+     * on the message text would be worse: it would couple this command to
+     * sentences the core package is free to reword.
      */
     private function misconfigured(string $message): int
     {
-        $this->error(sprintf('The Ameriabank vPOS configuration is not usable. %s', $message));
+        $this->error(sprintf(
+            'Ameriabank vPOS is not set up correctly, and this run stopped without reaching a verdict on the '
+            .'credentials. %s',
+            $message,
+        ));
 
         return self::FAILURE;
     }
@@ -738,61 +784,18 @@ final class CheckCommand extends Command
     }
 
     /**
-     * The client refused a configured value, named when it can be named.
-     *
-     * The attempt budget is the only `ValidationException` a `GetPaymentId`
-     * exchange can provoke today, and it comes from one configuration key and
-     * nowhere else — so when it is the one that arrived, this says which key
-     * and which environment variable, because that is what the operator has to
-     * go and change.
-     *
-     * **It is established rather than assumed.** The previous version printed
-     * that message for every `ValidationException` reaching `handle()`, on a
-     * reading of the client package's call sites that was correct when it was
-     * made and held by nothing afterwards. The client is separately versioned:
-     * `GetPaymentIdRequest` takes an unchecked `int $orderId`, so a range check
-     * added upstream would turn the blind probe's own sentinel into a message
-     * sending the merchant to inspect an environment variable they never set —
-     * confidently, in the first sentence, which is the one acted on.
-     *
-     * **The test is the client's own factory, not a copy of its wording.**
-     * `ValidationException::maxAttemptsOutOfRange()` is built here with the
-     * value this command's configuration would have handed the client, and its
-     * message is compared with the one that arrived. A literal would have to be
-     * kept in step with a `sprintf()` in another package by hand, and would go
-     * silently stale in the direction that keeps naming `max_attempts`.
-     *
-     * Comparing against the *configured* value rather than against the factory
-     * in general is deliberate. A refusal of some other number is not a refusal
-     * of what this configuration asked for, and this command cannot say which
-     * key produced it, so it takes the generic branch and prints the client's
-     * words rather than guessing.
-     *
-     * Both branches exit 1. A value this package's configuration handed the
-     * client and the client refused is a fact about the merchant's
-     * configuration, not a guess about their credentials, whichever value it
-     * turns out to be.
-     */
-    private function attemptBudgetRefused(Repository $config, string $message): int
-    {
-        $configured = $this->configInt($config, 'max_attempts');
-
-        if ($message !== ValidationException::maxAttemptsOutOfRange($configured)->getMessage()) {
-            return $this->configuredValueRefused($message);
-        }
-
-        $this->error(sprintf(
-            'The Ameriabank vPOS configuration is not usable. ameriabank-vpos.max_attempts '
-            .'(AMERIABANK_VPOS_MAX_ATTEMPTS) reached the client as %d, and the client refused it. %s',
-            $configured,
-            $message,
-        ));
-
-        return self::FAILURE;
-    }
-
-    /**
      * The client refused something this command cannot name.
+     *
+     * The only `ValidationException` branch there is. It was the fallback
+     * behind a named attempt-budget branch until the attempt budget moved to
+     * this side of the bridge: `AmeriabankVposServiceProvider::maxAttempts()`
+     * now refuses an out-of-range budget before `new Vpos(...)` is entered, so
+     * the client's own refusal of that value can no longer be raised, and the
+     * branch that recognised it by rebuilding the client's message would have
+     * been unreachable code guarding against a message it could never see.
+     * What arrives here is what it always was — a refusal this package did not
+     * anticipate — and it is now the whole of what a `ValidationException`
+     * means to this command.
      *
      * No key and no environment variable is named, because naming one would be
      * the assumption this branch exists to stop making. **Nothing is claimed
@@ -804,14 +807,21 @@ final class CheckCommand extends Command
      *
      * **Nor about when it was refused.** Every factory reachable on this
      * exchange today raises before the request is dispatched, but that is a
-     * reading of one version of a separately versioned package — the same
-     * class of claim `attemptBudgetRefused()` above stopped making, and not
-     * one to reintroduce a level down where the wording is looser and nothing
-     * checks it. `GetPaymentIdResponse` is built from the reply *after* the
-     * send on this very call path, and the client already raises a
+     * reading of one version of a separately versioned package, not something
+     * this command checks. `GetPaymentIdResponse` is built from the reply
+     * *after* the send on this very call path, and the client already raises a
      * `ValidationException` after a send elsewhere, in `Vpos::verify()`.
      * "Nothing was sent", printed about a run that sent something, is a
      * stronger and more damaging claim than naming the wrong key.
+     *
+     * **Nor that the refused value came from configuration**, which is what
+     * the opening sentence used to claim. It read "The Ameriabank vPOS
+     * configuration is not usable." over a paragraph explaining that this
+     * command cannot tell whether a setting was involved at all — the first
+     * sentence contradicting the second, with the first being the one an
+     * operator acts on. What the opening says now is what the catch clause
+     * establishes and no more: the client raised its own named refusal, and
+     * the run stopped without reaching a verdict on the credentials.
      *
      * **The client's own words are still printed whole, and the reason is not
      * that their content is known.** They belong to the *client* package's
@@ -824,18 +834,24 @@ final class CheckCommand extends Command
      * the only evidence this branch has, so they are passed through unedited
      * and every sentence around them is written to claim nothing about them.
      *
-     * Exit 1, grouped with the named refusal above it because both stop on a
-     * refusal the operator has an account of and can act on — not because this
-     * branch has established that the refused value was configured. It cannot
-     * establish that, which is why the message says so in words.
+     * **Exit 1 is unchanged, and the sentence changing does not change it.**
+     * The exit code says what the run can do, not where the fault lies: the
+     * run cannot proceed, it produced no verdict about the credentials, and
+     * something the merchant controls — a setting, a bound HTTP client, an
+     * `--order-id` — was refused by a component that named its own refusal.
+     * Exit 2 is this command's code for "nothing was established about the
+     * credentials, re-run"; there is nothing to re-run here, because the same
+     * refusal will arrive again until something changes. So the code stays 1
+     * and only the claim about the cause is withdrawn.
      */
     private function configuredValueRefused(string $message): int
     {
         $this->error(sprintf(
-            'The Ameriabank vPOS configuration is not usable. The client raised a validation refusal, and this '
-            .'command cannot tell what it refused, which setting the refused input came from, or whether it came '
-            .'from a setting at all — the client\'s own words are the whole of what is known here. %s Check the '
-            .'ameriabank-vpos configuration against that message; if nothing there matches, the refusal is not '
+            'The Ameriabank vPOS client refused an input, and this run stopped without reaching a verdict on '
+            .'the credentials. This command cannot tell what was refused, which setting the refused input came '
+            .'from, or whether it came from a setting at all — the client\'s own words are the whole of what is '
+            .'known here. %s Check the ameriabank-vpos configuration against that message; if nothing there '
+            .'matches, the refusal is not '
             .'about a value you set, and this output is worth reporting as a defect in this package rather than '
             .'a mistake in your configuration.',
             $message,
@@ -872,12 +888,24 @@ final class CheckCommand extends Command
      * initialiser as uncovered without running a test. As a local it sits on a
      * covered line, where the suite that already pins the four-character
      * output kills those mutants.
+     *
+     * A non-string value gets a placeholder rather than a refusal. This method
+     * only prints a line, and the run is going to stop a few lines below when
+     * the provider reads the same key and refuses it by name — so throwing
+     * from here would withhold the environment, the base URL and the other
+     * credentials from an operator who is about to be told one of them is the
+     * wrong type. Reporting every line and then failing is the more
+     * informative order, and it is the order the whole command is written in.
      */
     private function masked(Repository $config, string $key): string
     {
         $visibleCharacters = 4;
 
-        $value = $this->configString($config, $key);
+        $value = $this->configValue($config, $key);
+
+        if (! is_string($value)) {
+            return $this->absentOrMistyped($value);
+        }
 
         return $value === ''
             ? self::NOT_SET
@@ -891,47 +919,95 @@ final class CheckCommand extends Command
      * reading any part of it into a message. Knowing it is missing is the
      * common case and is worth reporting; knowing anything more about it is
      * not worth the risk of a screenshot.
+     *
+     * A wrong-typed password is worth reporting for the same reason as any
+     * other key, and reporting it discloses nothing this method was not
+     * already disclosing: "(set)" and "(not a string)" both say the key holds
+     * something, and neither says what.
      */
     private function presence(Repository $config, string $key): string
     {
-        return $this->configString($config, $key) === '' ? self::NOT_SET : self::SET;
+        $value = $this->configValue($config, $key);
+
+        if (! is_string($value)) {
+            return $this->absentOrMistyped($value);
+        }
+
+        return $value === '' ? self::NOT_SET : self::SET;
     }
 
     /**
-     * A package configuration value as a string.
+     * Which placeholder a value that is not a string gets.
      *
-     * Anything that is not a string — a missing key, an unset environment
-     * variable arriving as null — reads as blank, and blank is refused by
-     * whichever component was asked for it.
+     * The distinction this command exists to stop losing. `null` is the shape
+     * a missing key and an unset environment variable both arrive in, and it
+     * really is absent. Anything else is present and typed wrongly, and
+     * printing "(not set)" over it sends the operator to look for a value they
+     * already supplied.
+     *
+     * The value is read for nothing but which of those two it is. Its type is
+     * not printed here either — the refusal the provider raises a moment later
+     * names the key and the type together, in one place, where the sentence
+     * has room to say what to do about it.
+     */
+    private function absentOrMistyped(mixed $value): string
+    {
+        return $value === null ? self::NOT_SET : self::NOT_A_STRING;
+    }
+
+    /**
+     * A package configuration value as a string, or a refusal naming its type.
+     *
+     * **This must read the key exactly as the service provider reads it.** The
+     * provider is what builds the client, so a key this command accepted and
+     * the provider refused — or the reverse — would print one account of the
+     * configuration and act on another.
+     *
+     * `null` reads as blank, because a missing key and an unset environment
+     * variable both arrive that way and blank is refused by whichever
+     * component was asked for it, in that component's own words. Anything else
+     * is set to the wrong type and is refused here, by a factory that names the
+     * key and the type and never the value.
+     *
+     * The type is resolved at this throw site and the value is handed on
+     * nowhere. A factory taking the value would make it frame 0's argument in
+     * the trace the refusal carries, and `getTraceAsString()` renders those
+     * verbatim into any log that records the exception — which for three of
+     * these keys is a credential. `ConfigurationException::notAString()` sets
+     * the reasoning out in full.
+     *
+     * `masked()` and `presence()` deliberately do not route through this: they
+     * print a line for a value they have been told to describe rather than to
+     * use, and their placeholder is the description.
+     *
+     * @throws ConfigurationException when the key is set to something other than a string
      */
     private function configString(Repository $config, string $key): string
     {
-        $value = $config->get(self::CONFIG_KEY.'.'.$key);
+        $value = $this->configValue($config, $key);
 
-        return is_string($value) ? $value : '';
+        if ($value === null) {
+            return '';
+        }
+
+        if (is_string($value)) {
+            return $value;
+        }
+
+        throw ConfigurationException::notAString($key, get_debug_type($value));
     }
 
     /**
-     * A package configuration value as the integer the client was handed.
+     * A package configuration value, untouched.
      *
-     * **This must read the key exactly as the service provider reads it**, 0
-     * for anything that is not an integer included. The provider builds the
-     * client with what this returns, so `attemptBudgetRefused()` can only
-     * recognise the client's refusal by rebuilding the message from the same
-     * number; the two drifting apart would send every attempt-budget mistake
-     * down the generic branch, quietly, with the run still exiting 1 and still
-     * printing the client's words. The suite pins both halves — an out-of-range
-     * budget and a non-integer one each assert the named message — so the drift
-     * is a red test rather than a lost sentence.
-     *
-     * The configured text is never echoed back. What decides the refusal is the
-     * value that reached the client.
+     * One place composes the key, so the namespace prefix is written once and
+     * every reader above sees exactly what the repository holds — including
+     * whether it holds `null`, which is the distinction `absentOrMistyped()`
+     * turns into a line and `configString()` turns into a refusal.
      */
-    private function configInt(Repository $config, string $key): int
+    private function configValue(Repository $config, string $key): mixed
     {
-        $value = $config->get(self::CONFIG_KEY.'.'.$key);
-
-        return is_int($value) ? $value : 0;
+        return $config->get(self::CONFIG_KEY.'.'.$key);
     }
 
     /**

@@ -4,8 +4,12 @@ declare(strict_types=1);
 
 use DavitVardanyan\AmeriabankVpos\Laravel\Exception\ConfigurationException;
 use DavitVardanyan\AmeriabankVpos\Laravel\Support\BackUrlResolver;
+use DavitVardanyan\AmeriabankVpos\Laravel\Tests\Support\ReadmePaymentStarter;
+use DavitVardanyan\AmeriabankVpos\Laravel\Tests\Support\StubHttpClient;
 use Illuminate\Routing\Exceptions\UrlGenerationException;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Route;
+use Psr\Http\Client\ClientInterface;
 
 beforeEach(function (): void {
     vposConfig();
@@ -144,4 +148,71 @@ it('names the route lookup failure as the cause of its refusal', function (): vo
     }
 
     throw new RuntimeException('The resolver accepted a route name that does not exist.');
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * The class is public API now, and this is the call path the README publishes.
+ *
+ * It was marked internal, and the marking cost more than it bought. The core's
+ * `InitPaymentRequest` takes `backUrl` as a required constructor argument, so a
+ * merchant told to pass `route(...)` instead left `ameriabank-vpos.back_url`
+ * read by nothing a payment executes: inert for real traffic, load-bearing only
+ * for `vpos:check`, and free to drift from whatever the controller really sent.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * The README example, built through the container and carried as far as the
+ * request model — which is as far as it can go without registering a real order
+ * with the gateway.
+ *
+ * Three things are asserted and each is a separate way the documented path
+ * could fail: that the container can satisfy a `BackUrlResolver` type hint
+ * standing beside two client dependencies; that `resolve()` produces what the
+ * core accepts as a `BackURL`; and that the value which reaches the request
+ * model's own serialisation is the resolved route rather than anything else.
+ *
+ * `toArray()` is the observable end of it, because that is the array the
+ * transport serialises — asserting the constructor argument instead would only
+ * say what was passed in, not what would go out.
+ */
+it('builds the README example through the container, resolver and all', function (): void {
+    vposConfig(['ameriabank-vpos.back_url' => 'checkout.vpos.back']);
+
+    $starter = app(ReadmePaymentStarter::class);
+
+    expect($starter->collaborators())->toHaveCount(2)
+        ->and($starter->request()->toArray()['BackURL'])->toBe('http://localhost/checkout/vpos/back')
+        ->and($starter->request()->toArray()['BackURL'])->toBe(app(BackUrlResolver::class)->resolve());
+});
+
+/*
+ * The whole of P1 in one assertion: the diagnostic reports the value the
+ * payment would carry, because both come out of the same object.
+ *
+ * That was the divergence making this class public API exists to close. A
+ * config naming one route and a controller calling `route()` on another gave a
+ * `vpos:check` reporting a BackURL no payment would ever carry, and nothing
+ * anywhere would have noticed.
+ *
+ * The expected line is composed from the README path's own output rather than
+ * written down, so this cannot pass by both sides having been updated to the
+ * same stale literal — there is only one side.
+ *
+ * A stub answers the single exchange so that nothing reaches the network; what
+ * it answers is irrelevant here, because the BackURL line is printed before the
+ * send.
+ */
+it('reports the BackURL the documented payment path would send', function (): void {
+    vposConfig(['ameriabank-vpos.back_url' => 'checkout.vpos.back']);
+
+    app()->instance(ClientInterface::class, StubHttpClient::answering(200, '{"ResponseCode":"00"}'));
+
+    Artisan::call('vpos:check');
+
+    $wouldBeSent = app(ReadmePaymentStarter::class)->request()->toArray()['BackURL'];
+
+    expect(Artisan::output())->toContain('BackURL: '.$wouldBeSent)
+        ->and($wouldBeSent)->toBe('http://localhost/checkout/vpos/back');
 });

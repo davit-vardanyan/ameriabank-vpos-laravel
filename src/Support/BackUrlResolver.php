@@ -42,7 +42,22 @@ use function trim;
  * that name a route name print it, because a route name and a typo of one are
  * indistinguishable to look at.
  *
- * @internal
+ * ## It is public API, and it is how a BackURL should be built
+ *
+ * Resolve it from the container — `app(BackUrlResolver::class)->resolve()`, or
+ * type-hint it in a constructor, which is the same binding — and hand the
+ * result to the core's `InitPaymentRequest` as its `backUrl` argument.
+ *
+ * This class was marked internal until it was not, and the marking cost more
+ * than it bought — deliberately not written out as the tag it was, because a
+ * docblock naming that tag is read as carrying it.
+ * `InitPaymentRequest` takes `backUrl` as a required constructor argument, so a
+ * merchant told to use `route(...)` instead left `ameriabank-vpos.back_url`
+ * read by nothing a payment path executes: the key was inert for real traffic
+ * and load-bearing only for `vpos:check`, which then reported a BackURL no
+ * payment would ever carry whenever the two spellings drifted apart. Resolving
+ * both through here is what keeps the diagnostic's value and the payment's
+ * value the same value.
  */
 final readonly class BackUrlResolver
 {

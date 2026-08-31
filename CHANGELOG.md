@@ -140,6 +140,59 @@ and this project adheres to
   trace had never withheld it: the engine supplied the restore site's either way,
   so the omission *was* the leak.
 
+- `max_attempts` is validated by this package, not by the client. A value
+  outside 1–5, or one that is not an integer, is refused by
+  `ConfigurationException::invalidMaxAttempts()` at the `maxAttempts:` argument
+  position of `new Vpos(...)`. PHP evaluates arguments before entering the
+  constructor, so the refusal is raised while no `Vpos` and no `HttpTransport`
+  exists, and the core's `ValidationException` is unreachable for this cause
+  rather than merely pre-empted. The message names the key, its environment
+  variable and the accepted range, and never the configured value. The generic
+  `ValidationException` branch remains as the honest fallback for a refusal this
+  package did not anticipate, which is what removes the dependency on a message
+  string owned by a separately versioned package.
+- A configured value of the wrong type is reported as a type error rather than
+  as an absent one. `ConfigurationException::notAString()` names the key and the
+  type `get_debug_type()` read, and `vpos:check` prints `(not a string)` where
+  it printed `(not set)`. Previously `client_id: 12345678` was reported as
+  *"ClientID: (not set)"* and `max_attempts: '3'` as *"must be between 1 and 5,
+  got 0"* — a number nobody configured. No value is cast: a cast turns a
+  misconfigured value into a silently different one.
+- **No configured value is an argument to any frame of an exception this package
+  builds.** The type is resolved by `get_debug_type()` at the throw site and the
+  factories take the resulting name, so a credential cannot reach
+  `getTrace()[0]['args']` — where `getTraceAsString()` renders it and Laravel's
+  default log formatter writes it to disk. This is the other half of
+  `ConfigurationException::__serialize()`'s trace narrowing, which covers a
+  queued exception and not a logged one; neither half is sufficient alone.
+- `BackUrlResolver` is public API. `app(BackUrlResolver::class)->resolve()` is
+  the supported way to build `InitPaymentRequest`'s `backUrl`, and the README's
+  controller example uses it. The class was previously internal and read by
+  nothing a merchant executes, so `ameriabank-vpos.back_url` was inert for real
+  traffic while `vpos:check` still refused to run without it — and a merchant
+  whose config named one route and whose controller passed another got a
+  `vpos:check` reporting a `BackURL` no payment would carry. It is bound with
+  `bind` rather than `singleton`: a cached resolver goes stale when the config
+  *instance* is replaced, which would reintroduce that divergence in a new shape.
+- The PSR-18 seam resolves in three tiers:
+  `AmeriabankVposServiceProvider::HTTP_CLIENT_KEY`
+  (`ameriabank-vpos.http-client`), then `Psr\Http\Client\ClientInterface`,
+  then the core's discovery. Tier 2 is unchanged current behaviour and is
+  **application-wide** — `bound()` is true for a binding, an instance or an
+  alias, so any package binding it hands its client to this one and the vPOS
+  credential payload goes out through it. Tier 1 is a container key and not a
+  configuration key: a client is an object that does not survive
+  `config:cache`. A tier-1 binding that is not a PSR-18 client is refused rather
+  than skipped, since falling through would send the payload through the shared
+  client after the application had explicitly named a different one. Contextual
+  binding cannot serve here — the provider constructs `Vpos` with `new`, so
+  `when(Vpos::class)->needs(...)` is never consulted.
+- `vpos:check` no longer claims to know where a refused value came from. The row
+  stays on exit 1, and the opening sentence states only what the catch
+  establishes: the client refused an input and the run stopped without reaching
+  a verdict on the credentials. It asserts neither a setting nor a send, because
+  the core raises a configuration refusal after a send too.
+
 ### Notes
 
 - Requires PHP `^8.3` and Laravel 12 or 13. Laravel 11 and below are not

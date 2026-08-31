@@ -59,9 +59,57 @@ application already has a PSR-18 implementation installed, the core discovers it
 through `php-http/discovery`; if it finds none, the first resolution throws the
 core's `ConfigurationException` rather than failing later and less clearly.
 
-To choose one explicitly — which is also how a test substitutes a fake — bind
-`Psr\Http\Client\ClientInterface` in the container. This package uses the bound
-implementation when there is one and leaves discovery to run when there is not.
+### Choosing the client your card data goes through
+
+This package looks in three places, in this order, and stops at the first one
+that answers:
+
+| | Where it looks | Who else uses it |
+|---|---|---|
+| 1 | the container key `ameriabank-vpos.http-client` | nothing — this package only |
+| 2 | the container binding for `Psr\Http\Client\ClientInterface` | **your whole application** |
+| 3 | nowhere — the core runs `php-http/discovery` | n/a |
+
+**Tier 2 is application-wide, and it is shared with everything else.** Laravel's
+`bound()` answers true for a binding, an instance or an alias, so any package,
+provider or test that binds `Psr\Http\Client\ClientInterface` hands its client
+to this one as well — and the vPOS credential payload goes out through it. That
+is fine when the binding is a plain client. It is not fine when it carries a
+base URI, default headers, an auth middleware or a proxy for some other API,
+because none of that was meant for the bank.
+
+Tier 1 is how you say which client is meant for the bank without touching the
+shared one:
+
+```php
+use DavitVardanyan\AmeriabankVpos\Laravel\AmeriabankVposServiceProvider;
+use GuzzleHttp\Client;
+use Psr\Http\Client\ClientInterface;
+
+$this->app->singleton(
+    AmeriabankVposServiceProvider::HTTP_CLIENT_KEY,
+    static fn (): ClientInterface => new Client(['timeout' => 30]),
+);
+```
+
+The key is a **container key, not a configuration key.** It is not read from
+`config/ameriabank-vpos.php` and does not appear there: configuration holds
+values that survive `config:cache`, and an HTTP client is an object that does
+not. Note also that the string contains a dot, so had it been a configuration
+path it would have read as `http-client` *nested under* `ameriabank-vpos` — a
+different thing entirely, and one this package never reads. Bind it in a
+service provider. Cite the constant rather than retyping the string, so that a
+typo is an error where you wrote it instead of a binding that is quietly never
+found.
+
+Anything bound under tier 1 that is not a `Psr\Http\Client\ClientInterface` is
+refused when the client is first resolved, naming the key and the type it found.
+It is not skipped: falling through to tier 2 would send payment traffic to the
+client you had just said you did not want.
+
+Tier 2 still works exactly as before — bind `Psr\Http\Client\ClientInterface`
+and this package uses it — and it remains the simplest way for a test to
+substitute a fake.
 
 ## Configuration
 
@@ -143,9 +191,26 @@ name and produces a message naming the value, which says more than quietly
 accepting a spelling nothing else in the application uses.
 
 Resolution happens when the value is needed, never while providers register —
-routes are not loaded yet at that point. The class that does it is marked
-`@internal` and is not part of this package's public API, so build the `BackURL`
-you send with `route()` or read `config('ameriabank-vpos.back_url')` directly.
+routes are not loaded yet at that point.
+
+### Build the `BackURL` you send with the resolver
+
+`BackUrlResolver` is public API. **`app(BackUrlResolver::class)->resolve()` is
+the supported way to build the `backUrl` argument for `InitPaymentRequest`** —
+or type-hint the class in a constructor, which resolves the same binding and is
+what the controller example below does.
+
+The core's `InitPaymentRequest` takes `backUrl` as a required constructor
+argument, so passing `route('checkout.vpos.back')` there instead leaves
+`ameriabank-vpos.back_url` read by no code path a payment executes: the key is
+then inert for real traffic while `vpos:check` still refuses to run without it,
+and the two values can drift apart without anything noticing. A config naming
+one route and a controller passing another gives you a `vpos:check` reporting a
+`BackURL` no payment will ever carry.
+
+Resolving both through the same class is what keeps them the same value. It
+does not make the gateway agree with either — the resolver checks that the
+value is a URL or a route this application has registered, and nothing more.
 
 ### Logging is off unless you turn it on
 
@@ -166,6 +231,7 @@ not write to a log unless it was asked to, so the default is off.
 | `DavitVardanyan\AmeriabankVpos\Client\BindingsClient` | resolved from that singleton |
 | `DavitVardanyan\AmeriabankVpos\Client\ReportsClient` | resolved from that singleton |
 | `DavitVardanyan\AmeriabankVpos\Callback\VposCallback` | built from the current request's query string |
+| `DavitVardanyan\AmeriabankVpos\Laravel\Support\BackUrlResolver` | rebuilt on each resolution |
 
 `Vpos` is a singleton because it owns the transport and the discovered PSR-18
 client, and an application wants one of those.
@@ -176,6 +242,13 @@ it built in its own constructor, so resolving `PaymentsClient` twice returns the
 same object. The container does not share them; the client already does. Binding
 them as singletons would add a second layer of caching and one more thing to
 reason about when a test swaps one.
+
+`BackUrlResolver` is not a singleton either, for a different reason: it owns
+nothing worth sharing, and it reads `back_url` from whichever configuration
+repository the container holds when you call `resolve()`. A cached instance
+would hold the repository it was built with, so an application that replaces
+its configuration — a long-lived worker reloading it, a test rebinding it —
+could go on resolving a `BackURL` from a configuration no longer in force.
 
 ## Usage
 
@@ -194,6 +267,7 @@ namespace App\Http\Controllers;
 use DavitVardanyan\AmeriabankVpos\Client\PaymentsClient;
 use DavitVardanyan\AmeriabankVpos\Enum\Currency;
 use DavitVardanyan\AmeriabankVpos\Enum\Language;
+use DavitVardanyan\AmeriabankVpos\Laravel\Support\BackUrlResolver;
 use DavitVardanyan\AmeriabankVpos\Money\Amount;
 use DavitVardanyan\AmeriabankVpos\Request\InitPaymentRequest;
 use DavitVardanyan\AmeriabankVpos\Vpos;
@@ -204,6 +278,7 @@ final class StartPaymentController
     public function __construct(
         private readonly PaymentsClient $payments,
         private readonly Vpos $vpos,
+        private readonly BackUrlResolver $backUrl,
     ) {}
 
     public function __invoke(): RedirectResponse
@@ -211,7 +286,7 @@ final class StartPaymentController
         $init = $this->payments->init(new InitPaymentRequest(
             amount: Amount::fromMinorUnits(1000, Currency::AMD),  // 10.00 AMD
             orderId: 1749,                                        // your own order number
-            backUrl: route('checkout.vpos.back'),
+            backUrl: $this->backUrl->resolve(),                   // your configured back_url
             description: 'Order 1749',
             opaque: 'basket-1749',                                // echoed back to you untouched
             timeout: 900,                                         // payment page valid for 15 minutes
@@ -223,6 +298,14 @@ final class StartPaymentController
     }
 }
 ```
+
+`$this->backUrl->resolve()` returns the configured `back_url` — the absolute URL
+as it stands, or the named route resolved through Laravel's URL generator — and
+throws a `ConfigurationException` naming the value rather than handing the
+gateway a blank `BackURL`. It is the same value `vpos:check` reports, which is
+the point of resolving it here rather than calling `route()` again. Where you
+are not in a constructor, `app(BackUrlResolver::class)->resolve()` is the same
+binding.
 
 `Amount` holds an integer minor-unit count and a `Currency`; there is no
 constructor taking a float. `paymentPageUrl()` refuses a blank `PaymentID`
@@ -417,7 +500,7 @@ that gets read.
 | either | the gateway could not be reached | nothing; nothing arrived | 2 |
 | either | a reply this client cannot read | nothing | 2 |
 | either | any other failure, named by its class | nothing; the run stopped before it could establish anything | 2 |
-| either | the configuration would not resolve, an out-of-range `max_attempts` included | the configuration is wrong, and which value | 1 |
+| either | something vPOS needs would not resolve — a setting, an out-of-range `max_attempts`, or the package-scoped HTTP client binding | that the setup is wrong, and which key or binding is at fault | 1 |
 | either | the client refused something else | nothing about *what* was refused, or whether it was configured at all; the client's own refusal is printed, and no key is named or guessed | 1 |
 | neither | `--order-id` was given something that is not an integer | nothing; nothing was sent | 2 |
 
@@ -447,11 +530,15 @@ endpoint has actually been seen to send.
 ### What is never printed
 
 Nothing secret, and nothing belonging to a real order. The password is reported
-only as `(set)` or `(not set)` and is never read into a message; the ClientID and
-username are truncated to their first four characters, which is enough to tell
-two credential sets apart in a screenshot and not enough to use. **The
-`PaymentId` the gateway returns is never printed, in either mode** — it
-identifies a real payment, and this output goes into terminals and CI logs. A
+only as `(set)`, `(not set)` or `(not a string)`, and is never read into a
+message; the ClientID and username are truncated to their first four characters
+— or reported as `(not set)` or `(not a string)` when there is nothing to
+truncate — which is enough to tell two credential sets apart in a screenshot and
+not enough to use. `(not a string)` says the key is set to something that is not
+a string, and says nothing further about it: like `(set)`, it discloses that the
+key holds a value and not what that value is. **The `PaymentId` the gateway
+returns is never printed, in either mode** — it identifies a real payment, and
+this output goes into terminals and CI logs. A
 reply the client cannot parse is not echoed either: a raw response body is
 unvalidated remote content.
 

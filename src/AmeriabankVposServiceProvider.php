@@ -13,9 +13,11 @@ use DavitVardanyan\AmeriabankVpos\Config\Environment;
 use DavitVardanyan\AmeriabankVpos\Exception\ValidationException;
 use DavitVardanyan\AmeriabankVpos\Laravel\Commands\CheckCommand;
 use DavitVardanyan\AmeriabankVpos\Laravel\Exception\ConfigurationException;
+use DavitVardanyan\AmeriabankVpos\Laravel\Support\BackUrlResolver;
 use DavitVardanyan\AmeriabankVpos\Vpos;
 use Illuminate\Contracts\Config\Repository;
 use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Contracts\Routing\UrlGenerator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
@@ -23,13 +25,14 @@ use Psr\Http\Client\ClientInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
+use function get_debug_type;
 use function is_int;
 use function is_string;
 
 /**
  * Wires the Ameriabank vPOS client into a Laravel application.
  *
- * Five bindings, one configuration file, and nothing else. The client already
+ * Six bindings, one configuration file, and nothing else. The client already
  * knows how to talk to the gateway; this provider's whole job is to build it
  * once from `config/ameriabank-vpos.php` and to make its parts injectable.
  *
@@ -48,6 +51,22 @@ use function is_string;
  * controller handling the BackURL can take it as a parameter. It is untrusted
  * data with a type, not a verdict — `Vpos::verify()` is the only thing that
  * establishes what actually happened to a payment.
+ *
+ * `BackUrlResolver` is bound **non-singleton**, and the binding is written out
+ * rather than left to autowiring. It owns nothing — no transport, no
+ * connection, no cached value — so there is no resource for a singleton to
+ * share, and it reads `back_url` inside `resolve()` from whichever
+ * configuration repository the container holds at that moment. Caching the
+ * object would pin the repository it was constructed with, so an application
+ * that replaces its configuration between resolutions — a long-lived worker
+ * reloading it, a test rebinding `config` as an instance — would keep
+ * resolving the BackURL of a configuration that is no longer in force. That is
+ * the same silent divergence between the configured value and the sent one
+ * that making this class public API exists to close, so the cheaper failure is
+ * to rebuild two constructor arguments per call. Writing the binding out is
+ * what makes it a documented seam rather than an accident of the class being
+ * autowirable: `bound()` answers true for it, and a future constructor
+ * argument the container cannot guess fails here instead of at a call site.
  *
  * ## Nothing is validated while the application boots
  *
@@ -75,6 +94,26 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
      */
     private const string CONFIG_TAG = 'ameriabank-vpos-config';
 
+    /**
+     * The container key this package looks for its own PSR-18 client under.
+     *
+     * A **container** key, not a configuration path. It is public so that the
+     * string is cited rather than retyped — an application binds
+     * `AmeriabankVposServiceProvider::HTTP_CLIENT_KEY` and a test asserts
+     * against the same constant, so a typo is a fatal at the call site instead
+     * of a binding that is silently never found.
+     *
+     * It is written out in full rather than composed from `CONFIG_KEY`. A
+     * class constant whose initialiser is a concatenation is mutated by
+     * `pest-plugin-mutate` and can never be covered by it — a `const` is not an
+     * executable statement, so it appears in no coverage report and every
+     * mutant on it is classified uncovered without a test having been run. One
+     * literal is the price of the floor staying reachable.
+     *
+     * @see AmeriabankVposServiceProvider::httpClient() for what is done with it
+     */
+    public const string HTTP_CLIENT_KEY = 'ameriabank-vpos.http-client';
+
     public function register(): void
     {
         $this->mergeConfigFrom($this->configPath(), self::CONFIG_KEY);
@@ -99,6 +138,14 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
         $this->app->bind(
             VposCallback::class,
             static fn (Application $app): VposCallback => self::makeCallback($app),
+        );
+
+        $this->app->bind(
+            BackUrlResolver::class,
+            static fn (Application $app): BackUrlResolver => new BackUrlResolver(
+                $app->make(Repository::class),
+                $app->make(UrlGenerator::class),
+            ),
         );
     }
 
@@ -134,15 +181,23 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
     /**
      * Builds the one client the application gets.
      *
-     * The PSR-18 client is taken from the container when something has bound
-     * one — which is how a merchant chooses Guzzle explicitly, and how a test
-     * substitutes a mock — and left null otherwise, so the client's own
-     * discovery runs and a failed discovery still surfaces as the core's
-     * ConfigurationException rather than as a bare discovery error.
+     * The PSR-18 client is chosen by `httpClient()` below, from a
+     * package-scoped binding, then an application-wide one, then not at all.
      *
      * The credentials are built before anything else is evaluated, so a blank
      * one is refused by the core at the earliest possible point and no
      * half-configured client is ever constructed.
+     *
+     * The attempt budget is validated here rather than handed to the client to
+     * refuse. Every argument is evaluated before `Vpos::__construct()` is
+     * entered, so a refusal from `maxAttempts()` happens while there is still
+     * no Vpos, no HttpTransport and nothing holding the bad value — which is
+     * what makes the client's own `ValidationException` unreachable for this
+     * cause rather than merely pre-empted.
+     *
+     * @throws ConfigurationException on a key set to the wrong type, an unknown
+     *                                environment, an attempt budget the client would not accept, or a
+     *                                package-scoped HTTP client binding that is not a PSR-18 client
      */
     private function makeVpos(Application $app): Vpos
     {
@@ -155,10 +210,77 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
                 password: $this->configString($config, 'password'),
             ),
             environment: $this->environment($config),
-            httpClient: $app->bound(ClientInterface::class) ? $app->make(ClientInterface::class) : null,
+            httpClient: $this->httpClient($app),
             logger: $this->logger($config),
-            maxAttempts: $this->configInt($config, 'max_attempts'),
+            maxAttempts: $this->maxAttempts($config),
         );
+    }
+
+    /**
+     * The PSR-18 client the vPOS credential payload will be sent through.
+     *
+     * Three tiers, tried in this order, and the order is the whole point:
+     *
+     * 1. `ameriabank-vpos.http-client` — a container key owned by this package
+     *    and read by nothing else, so a client bound under it was bound *for*
+     *    the gateway;
+     * 2. `Psr\Http\Client\ClientInterface` — the application-wide PSR-18 key.
+     *    Kept, because it is what this package has always used and removing it
+     *    would break every application that binds it;
+     * 3. `null` — nothing is chosen, the core's `php-http/discovery` runs, and
+     *    a failed discovery still surfaces as the core's own
+     *    ConfigurationException rather than as a bare discovery error.
+     *
+     * Tier 2 is the reason tier 1 exists. `Container::bound()` answers true for
+     * a binding, an instance **or an alias**, and `ClientInterface` is a shared
+     * key any package in the application may claim. A client bound there for
+     * some other API — carrying a base URI, default headers, an auth middleware
+     * or a proxy — would be handed this package too, and the credential payload
+     * would go out through it. Discovery would also pick something, but
+     * discovery picks an *unconfigured* client; a container binding is far more
+     * likely to be configured for somewhere else entirely. Tier 1 gives an
+     * application a way to say which client is meant for the bank without
+     * unbinding the one it has.
+     *
+     * **Contextual binding is not available here, and trying it is wasted
+     * work: this provider constructs `Vpos` with `new` rather than resolving it
+     * through the container, so `when(Vpos::class)->needs(ClientInterface::class)`
+     * is never consulted — the container is never the thing building `Vpos`,
+     * and only the container fires a contextual binding.** Scoping therefore
+     * has to be a key this method reads itself, which is what tier 1 is.
+     *
+     * A tier 1 binding that is not a PSR-18 client is refused by name rather
+     * than skipped. Falling through to tier 2 would send the payment traffic
+     * somewhere the application explicitly said it did not want it to go, and
+     * would do it silently; the mistake is in the application's own service
+     * provider and it should hear about it the first time the client resolves.
+     *
+     * The refusal is handed the resolved value's *type*, not the value. What is
+     * bound there is arbitrary — a factory's return, a client wrapping an API
+     * token — and a factory taking it would put it in frame 0 of the trace the
+     * exception carries, which is logged. `configString()` gives the full
+     * reasoning; this site follows it.
+     *
+     * @throws ConfigurationException when the package-scoped key is bound to something
+     *                                that does not implement PSR-18
+     */
+    private function httpClient(Application $app): ?ClientInterface
+    {
+        if ($app->bound(self::HTTP_CLIENT_KEY)) {
+            $scoped = $app->make(self::HTTP_CLIENT_KEY);
+
+            if ($scoped instanceof ClientInterface) {
+                return $scoped;
+            }
+
+            throw ConfigurationException::httpClientNotPsr18(self::HTTP_CLIENT_KEY, get_debug_type($scoped));
+        }
+
+        if ($app->bound(ClientInterface::class)) {
+            return $app->make(ClientInterface::class);
+        }
+
+        return null;
     }
 
     /**
@@ -186,7 +308,8 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
     /**
      * The configured environment, or a refusal naming what was configured.
      *
-     * @throws ConfigurationException on any value the client does not know
+     * @throws ConfigurationException on any value the client does not know, and
+     *                                on a key set to something other than a string
      */
     private function environment(Repository $config): Environment
     {
@@ -222,30 +345,98 @@ final class AmeriabankVposServiceProvider extends ServiceProvider
     /**
      * A package configuration value as a string.
      *
-     * Anything that is not a string — a missing key, an unset environment
-     * variable arriving as null — reads as blank, and blank is refused by
-     * whichever component was asked for it. The key is the argument here and
-     * the value never is, so no credential is ever a stack frame's argument in
-     * this class.
+     * Three outcomes, and the middle one is the reason this is not a one-line
+     * `is_string()` read any more:
+     *
+     * - a string is returned as it was configured;
+     * - `null` — a missing key, or an environment variable that is not set —
+     *   reads as blank, and blank is refused by whichever component was asked
+     *   for it, in that component's own words. The value really is absent, so
+     *   "must not be blank" is the true account of it;
+     * - anything else is **set to the wrong type**, and is refused here by
+     *   name. Reading it as blank too would send the absent-value refusal for a
+     *   value that is present, and an operator told a key is missing goes
+     *   looking for a missing one.
+     *
+     * **The value is read here and handed on nowhere.** `get_debug_type()` is
+     * called at this throw site and `notAString()` is given the resulting type
+     * name, so the value is never an argument to a call that outlives this
+     * method. That matters because the exception is constructed inside the
+     * factory, which makes the factory's own call frame 0 of the trace the
+     * exception carries — and `getTraceAsString()` renders a frame's arguments
+     * verbatim into whatever logs it. A factory taking the value would have
+     * kept the credential out of the message and put it into the log.
+     *
+     * What that establishes is narrow and worth stating exactly: the two
+     * arguments this method passes onwards are a key and a type name, and its
+     * own frame carries the configuration repository and the key. It does not
+     * establish anything about frames this package did not build.
+     *
+     * @throws ConfigurationException when the key is set to something other than a string
      */
     private function configString(Repository $config, string $key): string
     {
         $value = $config->get(self::CONFIG_KEY.'.'.$key);
 
-        return is_string($value) ? $value : '';
+        if ($value === null) {
+            return '';
+        }
+
+        if (is_string($value)) {
+            return $value;
+        }
+
+        throw ConfigurationException::notAString($key, get_debug_type($value));
     }
 
     /**
-     * A package configuration value as an int.
+     * The configured attempt budget, refused here rather than by the client.
      *
-     * Anything that is not an int reads as 0, which the client rejects as
-     * outside its 1..5 attempt budget. Coercing instead would turn a
-     * misconfigured `max_attempts` into a silently different one.
+     * The client bounds this at 1..5 and raises its own `ValidationException`
+     * from the transport's constructor when a value is outside that. Letting it
+     * do so costs the merchant the only thing they need: the client is handed a
+     * number with no idea where it came from, so its message names no
+     * configuration key and no environment variable. This value comes from
+     * `ameriabank-vpos.max_attempts` and from nowhere else, so this side of the
+     * bridge can name both, and refusing before `new Vpos(...)` is entered
+     * means the client's refusal is never raised for this cause at all.
+     *
+     * A non-integer is refused rather than read as `0`. Zero was out of range
+     * and so was refused anyway, but by a message naming a number nobody
+     * configured. The type is resolved here and the value is not passed on, for
+     * the reason `configString()` gives: a factory's parameters become frame 0's
+     * arguments in the trace its exception carries. `max_attempts` is not a
+     * credential; the shape of the call is the same one either way.
+     *
+     * **The bounds are named locals rather than class constants.** A `const`
+     * declaration is not an executable statement, so it appears in no coverage
+     * report and the mutation tool classifies every mutant on its initialiser
+     * as uncovered without running a test. As locals they sit on a covered
+     * line, and they are handed to the factory as well as compared against, so
+     * a mutant that moves either bound changes both the accepted range and the
+     * printed one.
+     *
+     * They duplicate a bound the client owns, and the client keeps it private
+     * (`HttpTransport::MINIMUM_ATTEMPTS` and `MAXIMUM_ATTEMPTS`), so there is
+     * nothing to derive it from. The duplication is safe in the direction that
+     * matters: if the client ever narrows its range, a value this check accepts
+     * and the client refuses arrives as the client's own `ValidationException`
+     * and is reported by `CheckCommand::configuredValueRefused()` in the
+     * client's words, which is the generic branch's purpose.
+     *
+     * @throws ConfigurationException when the key is not an integer, or is outside the accepted range
      */
-    private function configInt(Repository $config, string $key): int
+    private function maxAttempts(Repository $config): int
     {
-        $value = $config->get(self::CONFIG_KEY.'.'.$key);
+        $lowestBudget = 1;
+        $highestBudget = 5;
 
-        return is_int($value) ? $value : 0;
+        $value = $config->get(self::CONFIG_KEY.'.max_attempts');
+
+        if (! is_int($value) || $value < $lowestBudget || $value > $highestBudget) {
+            throw ConfigurationException::invalidMaxAttempts(get_debug_type($value), $lowestBudget, $highestBudget);
+        }
+
+        return $value;
     }
 }
