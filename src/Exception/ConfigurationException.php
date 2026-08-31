@@ -6,11 +6,16 @@ namespace DavitVardanyan\AmeriabankVpos\Laravel\Exception;
 
 use DavitVardanyan\AmeriabankVpos\Config\Environment;
 use DavitVardanyan\AmeriabankVpos\Exception\VposExceptionInterface;
+use Exception;
 use LogicException;
+use ReflectionProperty;
 use Throwable;
 
+use function array_flip;
+use function array_intersect_key;
 use function array_map;
 use function implode;
+use function is_array;
 use function is_int;
 use function is_string;
 use function sprintf;
@@ -179,12 +184,28 @@ final class ConfigurationException extends LogicException implements VposExcepti
     /**
      * Replaces the default serialized state wholesale.
      *
-     * A default-serialized exception carries its stack trace, and a trace
-     * carries the arguments of every live frame. The frames above this class
-     * are container closures holding the application itself, so the default
-     * state is not reliably serializable at all — and where it is, it publishes
-     * objects this package does not own. Naming the state explicitly means only
-     * what is listed here can ever leave the process.
+     * A default-serialized exception carries its stack trace, and a frame of
+     * that trace carries the arguments its function was called with. The frames
+     * above this class are container closures, called with the application
+     * itself and holding a Closure of their own, so the default state publishes
+     * objects this package does not own and is frequently not serializable at
+     * all. Naming the state explicitly means only what is listed here can ever
+     * leave the process.
+     *
+     * The trace is listed, and does leave the process — narrowed by
+     * `safeFrames()` to `file`, `line`, `function`, `class` and `type`. Those
+     * five name code, not values: they say where the mistake was found and by
+     * what call, and none of them can carry a card number, a credential or an
+     * application object. `args`, which can carry all three, is dropped — and
+     * dropping it is exactly what makes a closure-holding trace serializable, so
+     * publishing the trace costs nothing that was previously being protected.
+     *
+     * The trace is published because omitting it does not withhold it. A
+     * restored exception gets a trace either way: `unserialize()` runs no
+     * constructor, so with no trace in the payload the engine leaves the one it
+     * built at the *restore* site, arguments and all. Sending the narrowed trace
+     * is what lets `__unserialize()` overwrite that, so the omission was the
+     * leak and the entry is the fix.
      *
      * `previous` is dropped for the same reason the core drops it, and that it
      * was dropped is recorded rather than silently lost.
@@ -197,6 +218,7 @@ final class ConfigurationException extends LogicException implements VposExcepti
             'message' => $this->getMessage(),
             'file' => $this->getFile(),
             'line' => $this->getLine(),
+            'trace' => $this->safeFrames($this->getTrace()),
             'chainDropped' => $this->getPrevious() instanceof Throwable,
         ];
     }
@@ -204,15 +226,29 @@ final class ConfigurationException extends LogicException implements VposExcepti
     /**
      * Writes the captured state back over the restore site's own.
      *
-     * `unserialize()` never runs a constructor, so `file` and `line` arrive
-     * describing the frame that called `unserialize()`. Overwriting them is
-     * what makes a restored object still point at where the misconfiguration
-     * was found.
+     * `unserialize()` never runs a constructor, so `file`, `line` and `trace`
+     * arrive describing the frame that called `unserialize()`. Overwriting them
+     * is what makes a restored object still point at where the misconfiguration
+     * was found — and, for the trace, what stops it describing the worker that
+     * read the payload, whose own frames carry whatever arguments that worker
+     * was called with.
+     *
+     * `trace` belongs to the engine rather than to this class, so it is reached
+     * by reflection over Exception's own property. There is no other way in:
+     * the property is private to a class this one only inherits from.
+     *
+     * The frames are narrowed again on the way in, by the type of each value as
+     * well as by its name. A payload is something that arrived from outside this
+     * process, so what it claims to be a trace is not trusted to already be one
+     * — the outbound filter protects a consumer of this package, and this one
+     * protects the process doing the restoring.
      *
      * Nothing here throws. A payload with a missing or wrong-typed key yields a
-     * degraded object rather than a TypeError inside `unserialize()`, which
-     * would turn a configuration mistake into a fatal in whichever worker
-     * happened to read it.
+     * degraded object — an empty trace, or a frame short a key, among the rest —
+     * rather than a TypeError inside `unserialize()`, which would turn a
+     * configuration mistake into a fatal in whichever worker happened to read
+     * it. Nor does it defer one: every key that survives holds the type
+     * `getTraceAsString()` expects to read it back as.
      *
      * @param  array<array-key, mixed>  $data
      */
@@ -221,10 +257,76 @@ final class ConfigurationException extends LogicException implements VposExcepti
         $message = $data['message'] ?? null;
         $file = $data['file'] ?? null;
         $line = $data['line'] ?? null;
+        $trace = $data['trace'] ?? null;
 
         $this->message = is_string($message) ? $message : '';
         $this->file = is_string($file) ? $file : '';
         $this->line = is_int($line) ? $line : 0;
         $this->chainDropped = ($data['chainDropped'] ?? null) === true;
+
+        (new ReflectionProperty(Exception::class, 'trace'))
+            ->setValue($this, is_array($trace) ? $this->safeFrames($trace) : []);
+    }
+
+    /**
+     * Narrows a trace to the keys that name code rather than values, and to the
+     * types those keys are supposed to hold.
+     *
+     * A positive filter, not a blacklist. `args` is the key that carries a
+     * payload today; `object` is not one `Exception::getTrace()` produces at all
+     * — only `debug_backtrace()` supplies it, and only when asked — so it is not
+     * named here as a thing being dropped. It does not need to be: a frame is a
+     * structure this package does not own, so an unknown key that survives is a
+     * leak, while one that is dropped is a slightly thinner diagnostic. Anything
+     * the engine adds later — an `object` key included, should one ever appear —
+     * is therefore dropped by default rather than published by default.
+     *
+     * Values are checked against the type their key is read back as, and a key
+     * holding anything else is dropped like an unknown one. Inbound, this runs
+     * over whatever a payload claimed, and `getTraceAsString()` reads the frames
+     * back positionally: a `file` that is not a string or a `line` that is not
+     * an int raises a PHP warning there, which Laravel's error handler turns
+     * into an ErrorException. Narrowing by name alone would not prevent the
+     * fatal `__unserialize()` refuses to raise, only defer it to the first log
+     * formatter that read the trace. The frame itself survives a dropped key.
+     *
+     * One narrowing serves both directions rather than an inbound-only second
+     * one. Outbound the type check is satisfied by construction, since the
+     * engine types the frames it builds — an always-true branch there is the
+     * price of there being a single definition of what a safe frame is.
+     *
+     * The key list is a local rather than a class constant deliberately. A
+     * constant is not an executable statement, so it never appears in a
+     * coverage report and every mutant on it is classified uncovered without a
+     * test having been run — which puts MSI 100 out of reach for a reason that
+     * has nothing to do with the code being tested.
+     *
+     * Frames that are not arrays are skipped rather than rejected: this runs on
+     * the inbound path too, where the input is whatever a payload claimed, and
+     * that path must not throw.
+     *
+     * @param  array<array-key, mixed>  $trace
+     * @return list<array<array-key, mixed>>
+     */
+    private function safeFrames(array $trace): array
+    {
+        $safeFrameKeys = array_flip(['file', 'line', 'function', 'class', 'type']);
+        $safe = [];
+
+        foreach ($trace as $frame) {
+            if (is_array($frame)) {
+                $narrowed = [];
+
+                foreach (array_intersect_key($frame, $safeFrameKeys) as $key => $value) {
+                    if ($key === 'line' ? is_int($value) : is_string($value)) {
+                        $narrowed[$key] = $value;
+                    }
+                }
+
+                $safe[] = $narrowed;
+            }
+        }
+
+        return $safe;
     }
 }

@@ -3,5 +3,8 @@ parameters:
     paths:
         - src
         - tests
+        - config
+    configDirectories:
+        - config
     treatPhpDocTypesAsCertain: true
     checkUninitializedProperties: true

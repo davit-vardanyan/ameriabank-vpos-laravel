@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use DavitVardanyan\AmeriabankVpos\Laravel\Tests\Support\ProductionClasses;
 use Pest\Mutate\Options\IgnoreMinScoreOnZeroMutationsOption;
 use Pest\Mutate\Options\MinScoreOption;
 use Symfony\Component\Console\Input\ArgvInput;
@@ -45,9 +46,10 @@ use Symfony\Component\Console\Input\InputDefinition;
  * where arch() already covers the ground does not apply here.
  *
  * Both sides derive from their source of truth at test time:
- *   - the subject list comes from composer.json's autoload.psr-4 map walked
- *     over the filesystem, then reflected — never a list of class or method
- *     names written down here;
+ *   - the subject list comes from ProductionClasses::all(), which walks
+ *     composer.json's autoload.psr-4 map over the filesystem and verifies
+ *     that every name it yields autoloads; it is reflected here — never a
+ *     list of class or method names written down here;
  *   - the flag comes from a real json_decode() of composer.json, tokenised
  *     into arguments and matched with the plugin's own
  *     IgnoreMinScoreOnZeroMutationsOption::match(), so the spelling of the
@@ -57,8 +59,6 @@ use Symfony\Component\Console\Input\InputDefinition;
  * nothing a gate run produces. It is green on a fresh clone.
  */
 it('drops the zero-mutation escape hatch as soon as src carries mutatable code', function (): void {
-    $root = dirname(__DIR__, 2);
-
     /*
      * A method body is mutatable when it contains at least one token that is
      * not whitespace or a comment. The body is located by tokenising the exact
@@ -116,18 +116,8 @@ it('drops the zero-mutation escape hatch as soon as src carries mutatable code',
         return true;
     };
 
-    $manifestPath = $root.'/composer.json';
-    $rawManifest = file_get_contents($manifestPath);
-
-    if ($rawManifest === false) {
-        throw new RuntimeException(sprintf('Unable to read %s.', $manifestPath));
-    }
-
-    $manifest = json_decode($rawManifest, true, 512, JSON_THROW_ON_ERROR);
-
-    if (! is_array($manifest)) {
-        throw new RuntimeException(sprintf('%s does not decode to an object.', $manifestPath));
-    }
+    $manifestPath = ProductionClasses::root().'/composer.json';
+    $manifest = ProductionClasses::manifest();
 
     // --- The flag, read out of the manifest the gate actually runs. ---
 
@@ -157,87 +147,25 @@ it('drops the zero-mutation escape hatch as soon as src carries mutatable code',
 
     // --- The subjects, read out of the same manifest's production autoload map. ---
 
-    $autoload = $manifest['autoload'] ?? null;
-
-    if (! is_array($autoload)) {
-        throw new RuntimeException(sprintf('%s declares no "autoload" section.', $manifestPath));
-    }
-
     /*
-     * Only PSR-4 is walked. If production code ever arrives through another
-     * autoload mechanism, this guard would go blind to it silently, so it
-     * refuses to run instead.
+     * The walk lives in ProductionClasses::all() and exists only there. It
+     * reads this same manifest, and only PSR-4 is walked: if production code
+     * ever arrives through another autoload mechanism the helper refuses to
+     * run rather than going blind to it silently. Every name it yields is
+     * verified to autoload before it is returned, so what comes back is the
+     * production code this package actually ships.
+     *
+     * A second copy of that walk living here would be a subject list this
+     * guard maintains by hand in all but name: it would keep passing while
+     * drifting away from the one every other guard derives its subjects from,
+     * and the drift would show as production code quietly absent from the
+     * list rather than as a failure.
      */
-    $unsupported = array_diff(array_keys($autoload), ['psr-4']);
-
-    if ($unsupported !== []) {
-        throw new RuntimeException(sprintf(
-            'composer.json autoloads production code through "%s", which this guard cannot walk. Teach it that mechanism rather than letting production code become invisible to it.',
-            implode('", "', array_map(static fn (int|string $key): string => (string) $key, $unsupported)),
-        ));
-    }
-
-    $psr4 = $autoload['psr-4'] ?? null;
-
-    if (! is_array($psr4) || $psr4 === []) {
-        throw new RuntimeException(sprintf('%s declares no production PSR-4 map.', $manifestPath));
-    }
-
-    $classNames = [];
-
-    foreach ($psr4 as $prefix => $directory) {
-        if (! is_string($prefix) || ! is_string($directory)) {
-            throw new RuntimeException('The production PSR-4 map is not a string-to-string mapping.');
-        }
-
-        $base = $root.'/'.rtrim($directory, '/');
-
-        if (! is_dir($base)) {
-            throw new RuntimeException(sprintf('The PSR-4 map points at %s, which is not a directory.', $base));
-        }
-
-        $pending = [$base];
-
-        while ($pending !== []) {
-            $current = array_pop($pending);
-            $entries = scandir($current);
-
-            if ($entries === false) {
-                throw new RuntimeException(sprintf('Unable to list %s.', $current));
-            }
-
-            foreach ($entries as $entry) {
-                if ($entry === '.' || $entry === '..') {
-                    continue;
-                }
-
-                $path = $current.'/'.$entry;
-
-                if (is_dir($path)) {
-                    $pending[] = $path;
-
-                    continue;
-                }
-
-                if (! str_ends_with($path, '.php')) {
-                    continue;
-                }
-
-                $relative = substr($path, strlen($base) + 1, -4);
-                $classNames[] = $prefix.str_replace('/', '\\', $relative);
-            }
-        }
-    }
-
-    sort($classNames);
+    $classNames = ProductionClasses::all();
 
     $mutatable = [];
 
     foreach ($classNames as $className) {
-        if (! class_exists($className) && ! interface_exists($className) && ! trait_exists($className)) {
-            throw new RuntimeException(sprintf('%s does not autoload; the PSR-4 map and the filesystem disagree.', $className));
-        }
-
         $reflection = new ReflectionClass($className);
 
         foreach ($reflection->getMethods() as $method) {
@@ -314,18 +242,8 @@ it('drops the zero-mutation escape hatch as soon as src carries mutatable code',
  * nothing a gate run produces. It is green on a fresh clone.
  */
 it('holds the mutation score floor in composer.json at exactly 100', function (): void {
-    $manifestPath = dirname(__DIR__, 2).'/composer.json';
-    $rawManifest = file_get_contents($manifestPath);
-
-    if ($rawManifest === false) {
-        throw new RuntimeException(sprintf('Unable to read %s.', $manifestPath));
-    }
-
-    $manifest = json_decode($rawManifest, true, 512, JSON_THROW_ON_ERROR);
-
-    if (! is_array($manifest)) {
-        throw new RuntimeException(sprintf('%s does not decode to an object.', $manifestPath));
-    }
+    $manifestPath = ProductionClasses::root().'/composer.json';
+    $manifest = ProductionClasses::manifest();
 
     $scripts = $manifest['scripts'] ?? null;
 

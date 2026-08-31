@@ -154,6 +154,47 @@ final class ProductionClasses
     }
 
     /**
+     * The files the production classes are declared in.
+     *
+     * A guard whose rule is textual rather than structural — a forbidden token,
+     * a superglobal, a suppression comment — cannot express its subject as a
+     * class, but it must still take its subject list from the same source of
+     * truth every other guard does. Reflecting the classes back to their files
+     * is that bridge: it walks nothing of its own, so a file the PSR-4 map
+     * cannot reach is invisible to these guards for exactly the reason it is
+     * invisible to `all()`, and a second directory walk cannot drift away from
+     * the first because there is no second walk.
+     *
+     * Deduplicated and sorted; several classes may share one file.
+     *
+     * @return list<string>
+     *
+     * @throws JsonException when composer.json is not valid JSON
+     */
+    public static function files(): array
+    {
+        $files = [];
+
+        foreach (self::all() as $className) {
+            $file = (new ReflectionClass($className))->getFileName();
+
+            if ($file === false) {
+                throw new RuntimeException(sprintf(
+                    '%s is autoloaded from no file this guard can read, so it cannot be swept.',
+                    $className,
+                ));
+            }
+
+            $files[$file] = true;
+        }
+
+        $paths = array_keys($files);
+        sort($paths);
+
+        return $paths;
+    }
+
+    /**
      * The repository root, located from this file rather than from a working
      * directory a test runner is free to change.
      */

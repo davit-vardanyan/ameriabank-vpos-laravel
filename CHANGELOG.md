@@ -100,9 +100,9 @@ and this project adheres to
   for a run that generates no mutants: a perfect score over an empty set would
   be green for the wrong reason.
 - Architecture expectations via `pest-plugin-arch`, enforcing that everything in
-  `src/` is final, declares strict types, and contains no debug calls; that
-  `env()` is read nowhere outside `config/`; and that the `Exception`, `Facades`
-  and `Commands` namespaces hold nothing but what their names say.
+  `src/` is final, declares strict types, and contains no debug calls; and that
+  the `Exception`, `Facades` and `Commands` namespaces hold nothing but what
+  their names say.
 - CI across twelve combinations — PHP 8.3, 8.4 and 8.5 × Laravel 12 and 13 ×
   lowest and highest dependencies. Laravel and Testbench are paired, never
   crossed: Testbench 11 with Laravel 13, Testbench 10 with Laravel 12. Coverage
@@ -110,6 +110,35 @@ and this project adheres to
 - `phpunit.xml.dist` pins `zend.exception_ignore_args=0` and
   `zend.exception_string_param_max_len=15`. Without both, any test asserting a
   value is *absent* from a stack trace is vacuous in the direction that passes.
+- Guards for five rules the package stated and nothing enforced. The facade's
+  `@method static` tags are checked against the client's real signatures by
+  reflection — a **stale** tag is worse than a missing one, since PHPStan trusts
+  what it is given and would confidently analyse merchant code against a
+  signature the client no longer has. Every exception in `src/` must come from a
+  named factory rather than a `throw new` at the call site. The environment rule
+  now covers every spelling of itself — `env()`, `getenv()`,
+  `Illuminate\Support\Env`, and the `$_ENV`/`$_SERVER` superglobals, which no
+  architecture expectation can name — rather than the single spelling it pinned
+  before. And an inline PHPStan suppression must name the identifier it
+  suppresses and carry a reason, with the analysis level, the absence of a
+  baseline, and the set of analysed paths asserted alongside it. Every subject
+  list is derived at test time from the autoload map, reflection or the
+  filesystem; none is written down.
+- `config/ameriabank-vpos.php` is analysed by PHPStan at level 10. It ships, it
+  is the one place `env()` is permitted, and `env()` returns `mixed`, so every
+  value the service provider consumes originated somewhere nothing type-checked.
+  Larastan is told where the package's config directory is, since `config_path()`
+  resolves to an application path that a package does not have.
+- A restored `ConfigurationException` carries a filtered stack trace instead of
+  the restore site's. `unserialize()` runs no constructor, so the engine left the
+  trace describing whichever worker happened to read the payload — including the
+  arguments of its frames. The published trace keeps only `file`, `line`,
+  `function`, `class` and `type`, and each is dropped unless its value has the
+  type `getTraceAsString()` expects to read back, so a malformed payload degrades
+  rather than raising a warning on the first read. Dropping the arguments is also
+  what makes a trace holding framework closures serializable at all. Omitting the
+  trace had never withheld it: the engine supplied the restore site's either way,
+  so the omission *was* the leak.
 
 ### Notes
 

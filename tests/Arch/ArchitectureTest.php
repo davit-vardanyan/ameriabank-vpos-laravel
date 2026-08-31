@@ -35,19 +35,12 @@ arch('nothing debugs in production', function (): void {
 });
 
 /*
- * env() returns null once an application has cached its configuration, so a
- * package that reads the environment anywhere but in its config file works in
- * development and silently loses every credential in production. The failure is
- * a blank ClientID reaching the gateway, which answers response code 20 — a
- * message about credentials for a mistake that has nothing to do with them.
- *
- * config/ameriabank-vpos.php is the one file allowed to call it, and it is out
- * of reach of this expectation by construction: it belongs to no namespace, so
- * no PSR-4 prefix in composer.json maps to it and nothing here can see it.
+ * The environment rule that used to live here now lives in
+ * tests/Arch/EnvironmentAccessTest.php. It was widened from the single `env`
+ * spelling to every spelling of the same read, and the superglobal half of it
+ * needs a tokenised sweep that no arch() expectation can express, so the whole
+ * rule moved rather than being held in two halves in two files.
  */
-arch('nothing reads the environment outside the configuration file', function (): void {
-    expect('env')->not->toBeUsed();
-});
 
 arch('the exception namespace holds nothing but exceptions', function (): void {
     expect('DavitVardanyan\AmeriabankVpos\Laravel\Exception')
